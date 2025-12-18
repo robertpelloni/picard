@@ -4,7 +4,7 @@ PLUGIN_NAME = 'Artist Discography & Bandcamp'
 PLUGIN_AUTHOR = 'Jules'
 PLUGIN_DESCRIPTION = 'Load all albums for an artist and open Bandcamp links.'
 PLUGIN_VERSION = '0.2'
-PLUGIN_API_VERSIONS = ['2.0', '2.1', '2.2', '2.3', '2.4', '2.5', '2.6', '2.7', '2.8', '2.9', '2.10', '2.11']
+PLUGIN_API_VERSIONS = ['2.9', '2.10', '2.11']
 PLUGIN_LICENSE = 'GPL-2.0-or-later'
 PLUGIN_LICENSE_URL = 'https://www.gnu.org/licenses/gpl-2.0.html'
 
