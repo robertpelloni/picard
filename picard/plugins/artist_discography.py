@@ -11,6 +11,7 @@ PLUGIN_LICENSE_URL = 'https://www.gnu.org/licenses/gpl-2.0.html'
 from functools import partial
 from PyQt6 import QtWidgets, QtCore
 from picard import log
+from picard.tagger import Tagger
 from picard.album import Album
 from picard.cluster import Cluster
 from picard.file import File
@@ -114,7 +115,7 @@ class LoadDiscography(BaseAction):
             log.error("Load Discography: No Artist ID found in selected item.")
             return
 
-        load_discography(self.tagger, artist_id)
+        load_discography(Tagger.instance(), artist_id)
 
 
 register_cluster_action(LoadDiscography())
@@ -129,8 +130,9 @@ class LoadDiscographyTool(BaseAction):
 
     def callback(self, objects):
         # objects is ignored for main menu actions usually
+        tagger = Tagger.instance()
         text, ok = QtWidgets.QInputDialog.getText(
-            self.tagger.window,
+            tagger.window,
             "Load Discography",
             "Enter Artist Name:"
         )
@@ -138,21 +140,22 @@ class LoadDiscographyTool(BaseAction):
             self.search_artist(text)
 
     def search_artist(self, query):
-        self.tagger.webservice.mb_api.find_artists(
+        Tagger.instance().webservice.mb_api.find_artists(
             self._handle_search_response,
             query=query,
             limit=10
         )
 
     def _handle_search_response(self, document, http, error):
+        tagger = Tagger.instance()
         if error:
             log.error(f"Artist Search Error: {http.errorString()}")
-            QtWidgets.QMessageBox.critical(self.tagger.window, "Error", f"Search failed: {http.errorString()}")
+            QtWidgets.QMessageBox.critical(tagger.window, "Error", f"Search failed: {http.errorString()}")
             return
 
         artists = document.get('artists', [])
         if not artists:
-            QtWidgets.QMessageBox.information(self.tagger.window, "Load Discography", "No artists found.")
+            QtWidgets.QMessageBox.information(tagger.window, "Load Discography", "No artists found.")
             return
 
         # Prepare list for selection
@@ -170,7 +173,7 @@ class LoadDiscographyTool(BaseAction):
             items.append(desc)
 
         item, ok = QtWidgets.QInputDialog.getItem(
-            self.tagger.window,
+            tagger.window,
             "Select Artist",
             "Choose an artist:",
             items,
@@ -182,7 +185,7 @@ class LoadDiscographyTool(BaseAction):
             index = items.index(item)
             selected_artist = artists[index]
             artist_id = selected_artist['id']
-            load_discography(self.tagger, artist_id)
+            load_discography(tagger, artist_id)
 
 register_tools_menu_action(LoadDiscographyTool())
 
@@ -230,12 +233,13 @@ class OpenSoulseek(BaseAction):
                 self._search_soulseek(item)
 
     def _search_soulseek(self, album):
+        tagger = Tagger.instance()
         artist = album.metadata['albumartist']
         title = album.metadata['album']
         if artist and title:
              msg = f"Soulseek integration is not yet implemented.\n\nWould search for: {artist} - {title}"
-             QtWidgets.QMessageBox.information(self.tagger.window, "Soulseek", msg)
+             QtWidgets.QMessageBox.information(tagger.window, "Soulseek", msg)
         else:
-             QtWidgets.QMessageBox.warning(self.tagger.window, "Soulseek", "Missing metadata for search.")
+             QtWidgets.QMessageBox.warning(tagger.window, "Soulseek", "Missing metadata for search.")
 
 register_album_action(OpenSoulseek())
