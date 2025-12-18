@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import MagicMock, patch, call
 from PyQt6.QtWidgets import QApplication
 
-# Initialize QApplication
+# Initialize QApplication if not already present
 if not QApplication.instance():
     app = QApplication(sys.argv)
 
