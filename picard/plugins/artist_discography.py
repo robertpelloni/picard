@@ -8,6 +8,18 @@ PLUGIN_API_VERSIONS = ['2.9', '2.10', '2.11']
 PLUGIN_LICENSE = 'GPL-2.0-or-later'
 PLUGIN_LICENSE_URL = 'https://www.gnu.org/licenses/gpl-2.0.html'
 
+"""
+Artist Discography & Bandcamp Plugin
+
+This plugin provides tools to load an artist's full discography from MusicBrainz and open Bandcamp pages.
+
+Features:
+- **Load Artist Discography**: Context menu action (on Cluster/File/Album) to fetch all releases for the artist from MusicBrainz and load them into Picard.
+- **Load Artist Discography (Tool)**: Main menu tool to search for an artist by name and load their discography.
+- **Open on Bandcamp**: Context menu action (on Album) to open the Bandcamp page for the release. It uses Bandcamp URLs found in MusicBrainz relationships or falls back to a search.
+- **Soulseek Placeholder**: A placeholder action for future Soulseek integration.
+"""
+
 from functools import partial
 from PyQt6 import QtWidgets, QtCore
 from picard import log
