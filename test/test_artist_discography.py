@@ -107,16 +107,27 @@ class TestArtistDiscographyPlugin(PicardTestCase):
         expected_url = "https://bandcamp.com/search?q=Artist%20Album%20bandcamp"
         mock_webbrowser.open.assert_called_once_with(expected_url)
 
-    @patch('picard.plugins.artist_discography.QtWidgets.QMessageBox')
-    def test_open_soulseek(self, mock_msgbox):
-        soulseek_action = self.plugin.OpenSoulseek()
+    @patch('picard.plugins.artist_discography.QtWidgets.QApplication.clipboard')
+    def test_search_soulseek(self, mock_clipboard):
+        # Mock clipboard object
+        mock_cb_instance = MagicMock()
+        mock_clipboard.return_value = mock_cb_instance
+
+        soulseek_action = self.plugin.SearchSoulseek()
         album = MagicMock(spec=Album)
         album.metadata = Metadata()
         album.metadata['albumartist'] = 'Artist'
         album.metadata['album'] = 'Album'
 
         soulseek_action.callback([album])
-        mock_msgbox.information.assert_called_once()
+
+        # Verify clipboard was set
+        mock_cb_instance.setText.assert_called_once_with("Artist Album")
+
+        # Verify status bar message
+        self.tagger_mock.window.statusBar().showMessage.assert_called_once()
+        args, _ = self.tagger_mock.window.statusBar().showMessage.call_args
+        self.assertIn("Copied to clipboard: Artist Album", args[0])
 
     @patch('picard.plugins.artist_discography.QtWidgets.QInputDialog.getText')
     @patch('picard.plugins.artist_discography.QtWidgets.QInputDialog.getItem')

@@ -238,10 +238,10 @@ class OpenBandcamp(BaseAction):
 register_album_action(OpenBandcamp())
 
 
-# --- Context Menu Action: Soulseek (Placeholder) ---
+# --- Context Menu Action: Soulseek ---
 
-class OpenSoulseek(BaseAction):
-    NAME = 'Search on Soulseek (Placeholder)'
+class SearchSoulseek(BaseAction):
+    NAME = 'Search on Soulseek'
 
     def callback(self, objects):
         for item in objects:
@@ -253,9 +253,10 @@ class OpenSoulseek(BaseAction):
         artist = album.metadata['albumartist']
         title = album.metadata['album']
         if artist and title:
-             msg = f"Soulseek integration is not yet implemented.\n\nWould search for: {artist} - {title}"
-             QtWidgets.QMessageBox.information(tagger.window, "Soulseek", msg)
+             query = f"{artist} {title}"
+             QtWidgets.QApplication.clipboard().setText(query)
+             tagger.window.statusBar().showMessage(f"Copied to clipboard: {query}", 5000)
         else:
-             QtWidgets.QMessageBox.warning(tagger.window, "Soulseek", "Missing metadata for search.")
+             log.warning("Soulseek search: Missing artist or album title.")
 
-register_album_action(OpenSoulseek())
+register_album_action(SearchSoulseek())
