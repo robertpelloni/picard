@@ -29,6 +29,10 @@ from picard.util import webbrowser2
 # --- Shared Loading Logic ---
 
 def load_discography(tagger, artist_id):
+    """
+    Load all releases for a given artist ID into Picard.
+    Initiates a recursive fetch of release pages from MusicBrainz.
+    """
     log.info(f"Loading discography for artist ID: {artist_id}")
     _fetch_page(tagger, artist_id, offset=0)
 
