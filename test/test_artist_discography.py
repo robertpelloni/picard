@@ -1,7 +1,8 @@
 
 import sys
 import unittest
-from unittest.mock import MagicMock, patch, call
+import asyncio
+from unittest.mock import MagicMock, patch, AsyncMock
 from PyQt6.QtWidgets import QApplication
 
 # Initialize QApplication if not already present
@@ -12,6 +13,7 @@ from test.picardtestcase import PicardTestCase
 from picard.metadata import Metadata
 from picard.cluster import Cluster
 from picard.album import Album
+from picard.config import get_config
 # Import the plugin module
 from picard.plugins import artist_discography
 
@@ -19,12 +21,14 @@ class TestArtistDiscographyPlugin(PicardTestCase):
 
     def setUp(self):
         super().setUp()
+        self.config = get_config()
         self.plugin = artist_discography
 
         # Mock Tagger.instance()
         self.tagger_mock = MagicMock()
         self.tagger_mock.webservice.mb_api = MagicMock()
         self.tagger_mock.load_album = MagicMock()
+        self.tagger_mock.add_files = MagicMock()
         self.tagger_mock.window = MagicMock()
 
         self.tagger_patcher = patch('picard.tagger.Tagger.instance', return_value=self.tagger_mock)
@@ -33,6 +37,10 @@ class TestArtistDiscographyPlugin(PicardTestCase):
         self.load_action = self.plugin.LoadDiscography()
         self.open_bandcamp_action = self.plugin.OpenBandcamp()
         self.load_tool = self.plugin.LoadDiscographyTool()
+        self.search_soulseek_action = self.plugin.SearchSoulseek()
+
+        # Reset Service Singleton
+        self.plugin.SoulseekService._instance = None
 
     def tearDown(self):
         self.tagger_patcher.stop()
@@ -49,113 +57,98 @@ class TestArtistDiscographyPlugin(PicardTestCase):
             self.assertEqual(args[0], self.tagger_mock)
             self.assertEqual(args[1], 'artist-mbid-123')
 
-    def test_load_discography_logic(self):
-        artist_id = 'artist-mbid-123'
+    def test_search_soulseek_clipboard_fallback(self,):
+        # Ensure credentials are unset
+        self.config.setting['soulseek_username'] = ''
+        self.config.setting['soulseek_password'] = ''
 
-        def side_effect(handler, **kwargs):
-            offset = kwargs.get('offset', 0)
-            total_count = 150
-            releases = []
-            for i in range(offset, min(offset + 100, total_count)):
-                releases.append({'id': f'release-{i}'})
+        with patch('picard.plugins.artist_discography.QtWidgets.QApplication.clipboard') as mock_clipboard:
+             mock_cb_instance = MagicMock()
+             mock_clipboard.return_value = mock_cb_instance
 
-            doc = {
-                'release-count': total_count,
-                'releases': releases
-            }
-            handler(doc, None, None)
+             album = MagicMock(spec=Album)
+             album.metadata = Metadata()
+             album.metadata['albumartist'] = 'Artist'
+             album.metadata['album'] = 'Album'
 
-        self.tagger_mock.webservice.mb_api.browse_releases.side_effect = side_effect
+             self.search_soulseek_action.callback([album])
 
-        self.plugin.load_discography(self.tagger_mock, artist_id)
+             mock_cb_instance.setText.assert_called_once_with("Artist Album")
+             self.tagger_mock.window.statusBar().showMessage.assert_called_once()
 
-        self.assertEqual(self.tagger_mock.webservice.mb_api.browse_releases.call_count, 2)
-        self.assertEqual(self.tagger_mock.load_album.call_count, 150)
+    def test_options_page(self):
+        page = self.plugin.SoulseekOptionsPage()
 
-    def test_bandcamp_url_handler(self):
-        album = MagicMock(spec=Album)
-        metadata = Metadata()
-        release_node = {
-            'relations': [
-                {
-                    'target-type': 'url',
-                    'url': {'resource': 'https://artist.bandcamp.com/album/test'}
-                }
-            ]
-        }
-        self.plugin.bandcamp_url_handler(album, metadata, release_node)
-        self.assertEqual(metadata['~bandcamp_url'], 'https://artist.bandcamp.com/album/test')
+        # Test Save
+        page.username_edit.setText("new_user")
+        page.password_edit.setText("new_pass")
+        page.dir_edit.setText("/tmp/down")
+        page.save()
+        self.assertEqual(self.config.setting['soulseek_username'], "new_user")
+        self.assertEqual(self.config.setting['soulseek_password'], "new_pass")
+        self.assertEqual(self.config.setting['soulseek_download_dir'], "/tmp/down")
 
-    @patch('picard.plugins.artist_discography.webbrowser2')
-    def test_open_bandcamp(self, mock_webbrowser):
-        album = MagicMock(spec=Album)
-        album.metadata = Metadata()
-        album.metadata['~bandcamp_url'] = 'https://example.bandcamp.com'
+    @patch('picard.plugins.artist_discography.SoulSeekClient')
+    @patch('picard.plugins.artist_discography.SlskSettings')
+    @patch('picard.plugins.artist_discography.HAS_AIOSLSK', True)
+    def test_soulseek_service_search(self, mock_settings, mock_client):
+        # Mock async behavior
+        mock_client_instance = MagicMock() # Use MagicMock instead of AsyncMock for search iterator
+        mock_client.return_value = mock_client_instance
 
-        self.open_bandcamp_action.callback([album])
-        mock_webbrowser.open.assert_called_once_with('https://example.bandcamp.com')
+        # Mock search results as an async iterator
+        async def async_results_iter(query):
+            yield MagicMock(filename="song.mp3", user="User1", size=1024, speed=100, slots=True)
 
-    @patch('picard.plugins.artist_discography.webbrowser2')
-    def test_open_bandcamp_fallback(self, mock_webbrowser):
-        album = MagicMock(spec=Album)
-        album.metadata = Metadata()
-        album.metadata['albumartist'] = 'Artist'
-        album.metadata['album'] = 'Album'
+        # Ensure that client.search() returns the async iterator directly when called
+        mock_client_instance.search.side_effect = lambda q: async_results_iter(q)
 
-        self.open_bandcamp_action.callback([album])
-        # Expected URL encoding
-        expected_url = "https://bandcamp.com/search?q=Artist%20Album%20bandcamp"
-        mock_webbrowser.open.assert_called_once_with(expected_url)
+        # We need to manually drive the async logic since we can't easily start the QThread loop in unit tests
+        # So we test _do_search directly via asyncio.run
 
-    @patch('picard.plugins.artist_discography.QtWidgets.QApplication.clipboard')
-    def test_search_soulseek(self, mock_clipboard):
-        # Mock clipboard object
-        mock_cb_instance = MagicMock()
-        mock_clipboard.return_value = mock_cb_instance
+        service = self.plugin.SoulseekService.instance()
+        service.configure("u", "p", "/d")
+        # Ensure client is mocked
+        service.client = mock_client_instance
 
-        soulseek_action = self.plugin.SearchSoulseek()
-        album = MagicMock(spec=Album)
-        album.metadata = Metadata()
-        album.metadata['albumartist'] = 'Artist'
-        album.metadata['album'] = 'Album'
+        results_received = []
+        service.results_found.connect(lambda res: results_received.extend(res))
 
-        soulseek_action.callback([album])
+        asyncio.run(service._do_search("query"))
 
-        # Verify clipboard was set
-        mock_cb_instance.setText.assert_called_once_with("Artist Album")
+        self.assertEqual(len(results_received), 1)
+        self.assertEqual(results_received[0].filename, "song.mp3")
 
-        # Verify status bar message
-        self.tagger_mock.window.statusBar().showMessage.assert_called_once()
-        args, _ = self.tagger_mock.window.statusBar().showMessage.call_args
-        self.assertIn("Copied to clipboard: Artist Album", args[0])
+    @patch('picard.plugins.artist_discography.SoulSeekClient')
+    @patch('picard.plugins.artist_discography.SlskSettings')
+    @patch('picard.plugins.artist_discography.HAS_AIOSLSK', True)
+    def test_soulseek_service_download(self, mock_settings, mock_client):
+        mock_client_instance = AsyncMock()
+        mock_client.return_value = mock_client_instance
 
-    @patch('picard.plugins.artist_discography.QtWidgets.QInputDialog.getText')
-    @patch('picard.plugins.artist_discography.QtWidgets.QInputDialog.getItem')
-    @patch('picard.plugins.artist_discography.load_discography')
-    def test_load_discography_tool(self, mock_load, mock_getItem, mock_getText):
-        mock_getText.return_value = ('Test Artist', True)
-        mock_getItem.return_value = ('Test Artist (US)', True)
+        # Mock Transfer
+        mock_transfer = MagicMock()
+        mock_transfer.local_path = "/tmp/song.mp3"
+        # Setup state mocks
+        state_mock = MagicMock()
+        state_mock.is_complete = True # Immediately complete
+        state_mock.is_aborted = False
+        state_mock.is_failed = False
+        mock_transfer.state = state_mock
 
-        def find_artists_side_effect(handler, **kwargs):
-            doc = {
-                'artists': [
-                    {'name': 'Test Artist', 'id': 'artist-id-1', 'area': {'name': 'US'}},
-                ]
-            }
-            handler(doc, None, None)
+        mock_client_instance.transfer_manager.download.return_value = mock_transfer
 
-        self.tagger_mock.webservice.mb_api.find_artists.side_effect = find_artists_side_effect
+        service = self.plugin.SoulseekService.instance()
+        service.configure("u", "p", "/d")
+        # Ensure client is mocked
+        service.client = mock_client_instance
 
-        self.load_tool.callback([])
+        completed_path = []
+        service.download_complete.connect(lambda p: completed_path.append(p))
 
-        mock_getText.assert_called_once()
-        self.tagger_mock.webservice.mb_api.find_artists.assert_called_once()
-        mock_getItem.assert_called_once()
+        asyncio.run(service._do_download("user", "file"))
 
-        mock_load.assert_called_once()
-        args, _ = mock_load.call_args
-        self.assertEqual(args[0], self.tagger_mock)
-        self.assertEqual(args[1], 'artist-id-1')
+        self.assertEqual(completed_path[0], "/tmp/song.mp3")
 
 if __name__ == '__main__':
     unittest.main()

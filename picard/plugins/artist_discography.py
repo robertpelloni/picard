@@ -2,9 +2,9 @@
 
 PLUGIN_NAME = 'Artist Discography & Bandcamp'
 PLUGIN_AUTHOR = 'Jules'
-PLUGIN_DESCRIPTION = 'Load all albums for an artist and open Bandcamp links.'
-PLUGIN_VERSION = '0.2'
-PLUGIN_API_VERSIONS = ['2.9', '2.10', '2.11']
+PLUGIN_DESCRIPTION = 'Load all albums for an artist and open Bandcamp links. Includes Soulseek integration.'
+PLUGIN_VERSION = '0.4'
+PLUGIN_API_VERSIONS = ['2.9', '2.10', '2.11', '3.0']
 PLUGIN_LICENSE = 'GPL-2.0-or-later'
 PLUGIN_LICENSE_URL = 'https://www.gnu.org/licenses/gpl-2.0.html'
 
@@ -17,16 +17,19 @@ Features:
 - **Load Artist Discography**: Context menu action (on Cluster/File/Album) to fetch all releases for the artist from MusicBrainz and load them into Picard.
 - **Load Artist Discography (Tool)**: Main menu tool to search for an artist by name and load their discography.
 - **Open on Bandcamp**: Context menu action (on Album) to open the Bandcamp page for the release. It uses Bandcamp URLs found in MusicBrainz relationships or falls back to a search.
-- **Soulseek Placeholder**: A placeholder action for future Soulseek integration.
+- **Search on Soulseek**: Context menu action (on Album) to search for the album on Soulseek. Supports native search and download via `aioslsk`.
 """
 
+import asyncio
+import os
 from functools import partial
-from PyQt6 import QtWidgets, QtCore
-from picard import log
+from PyQt6 import QtWidgets, QtCore, QtGui
+from picard import log, config
 from picard.tagger import Tagger
 from picard.album import Album
 from picard.cluster import Cluster
 from picard.file import File
+from picard.config import TextOption
 from picard.extension_points.item_actions import (
     register_album_action,
     register_cluster_action,
@@ -35,8 +38,23 @@ from picard.extension_points.item_actions import (
 )
 from picard.extension_points.metadata import register_album_metadata_processor
 from picard.extension_points.plugin_tools_menu import register_tools_menu_action
+from picard.extension_points.options_pages import register_options_page
+from picard.ui.options import OptionsPage
+from picard.ui.util import FileDialog
+from picard.i18n import gettext as _
 from picard.util import webbrowser2
 
+# Check for aioslsk availability
+try:
+    import aioslsk
+    from aioslsk.client import SoulSeekClient
+    from aioslsk.settings import Settings as SlskSettings, CredentialsSettings, SharesSettings
+    from aioslsk.transfer.state import TransferState
+    from aioslsk.transfer.model import TransferDirection
+    HAS_AIOSLSK = True
+except ImportError:
+    HAS_AIOSLSK = False
+    log.warning("Artist Discography Plugin: 'aioslsk' library not found. Soulseek integration will be limited to clipboard fallback.")
 
 # --- Shared Loading Logic ---
 
@@ -237,9 +255,268 @@ class OpenBandcamp(BaseAction):
 
 register_album_action(OpenBandcamp())
 
+# --- Soulseek Integration ---
 
-# --- Context Menu Action: Soulseek ---
+# Register Options
+TextOption('setting', 'soulseek_username', '')
+TextOption('setting', 'soulseek_password', '')
+TextOption('setting', 'soulseek_download_dir', '')
 
+# Options Page
+class SoulseekOptionsPage(OptionsPage):
+    NAME = 'soulseek_options'
+    TITLE = 'Soulseek'
+    PARENT = 'plugins'
+
+    OPTIONS = (
+        ('soulseek_username', ''),
+        ('soulseek_password', ''),
+        ('soulseek_download_dir', ''),
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent=parent)
+        self.box = QtWidgets.QVBoxLayout(self)
+
+        self.username_label = QtWidgets.QLabel(_("Soulseek Username:"))
+        self.box.addWidget(self.username_label)
+        self.username_edit = QtWidgets.QLineEdit()
+        self.box.addWidget(self.username_edit)
+
+        self.password_label = QtWidgets.QLabel(_("Soulseek Password:"))
+        self.box.addWidget(self.password_label)
+        self.password_edit = QtWidgets.QLineEdit()
+        self.password_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        self.box.addWidget(self.password_edit)
+
+        self.dir_label = QtWidgets.QLabel(_("Download Directory:"))
+        self.box.addWidget(self.dir_label)
+
+        self.dir_layout = QtWidgets.QHBoxLayout()
+        self.dir_edit = QtWidgets.QLineEdit()
+        self.dir_button = QtWidgets.QPushButton("...")
+        self.dir_button.clicked.connect(self.select_directory)
+        self.dir_layout.addWidget(self.dir_edit)
+        self.dir_layout.addWidget(self.dir_button)
+        self.box.addLayout(self.dir_layout)
+
+        if not HAS_AIOSLSK:
+            self.warning_label = QtWidgets.QLabel(_("<b>Note:</b> 'aioslsk' library is missing. Native search is disabled."))
+            self.box.addWidget(self.warning_label)
+
+        self.box.addStretch(1)
+
+    def select_directory(self):
+        path = FileDialog.getExistingDirectory(
+            parent=self,
+            directory=self.dir_edit.text(),
+        )
+        if path:
+             self.dir_edit.setText(path)
+
+    def load(self):
+        self.username_edit.setText(config.setting['soulseek_username'])
+        self.password_edit.setText(config.setting['soulseek_password'])
+        self.dir_edit.setText(config.setting['soulseek_download_dir'])
+
+    def save(self):
+        config.setting['soulseek_username'] = self.username_edit.text()
+        config.setting['soulseek_password'] = self.password_edit.text()
+        config.setting['soulseek_download_dir'] = self.dir_edit.text()
+
+register_options_page(SoulseekOptionsPage)
+
+
+# Soulseek Service (Threaded Worker)
+class SoulseekService(QtCore.QThread):
+    results_found = QtCore.pyqtSignal(list)
+    download_complete = QtCore.pyqtSignal(str)
+    service_error = QtCore.pyqtSignal(str)
+
+    _instance = None
+
+    @classmethod
+    def instance(cls):
+        if cls._instance is None:
+            cls._instance = SoulseekService()
+        return cls._instance
+
+    def __init__(self):
+        super().__init__()
+        self.loop = None
+        self.client = None
+        self.username = ""
+        self.password = ""
+        self.download_dir = ""
+        self.running = False
+
+    def configure(self, username, password, download_dir):
+        self.username = username
+        self.password = password
+        self.download_dir = download_dir
+
+    def run(self):
+        if not HAS_AIOSLSK:
+             return
+
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    def start_service(self):
+        if not self.isRunning():
+            self.start()
+
+    def perform_search(self, query):
+        if self.loop:
+            asyncio.run_coroutine_threadsafe(self._do_search(query), self.loop)
+
+    def perform_download(self, user, filename):
+        if self.loop:
+            asyncio.run_coroutine_threadsafe(self._do_download(user, filename), self.loop)
+
+    async def _ensure_client(self):
+        if self.client:
+            return self.client
+
+        settings = SlskSettings(
+            credentials=CredentialsSettings(
+                username=self.username,
+                password=self.password
+            ),
+            shares=SharesSettings(
+                download=self.download_dir
+            )
+        )
+        self.client = SoulSeekClient(settings)
+        await self.client.start()
+        await self.client.login()
+        return self.client
+
+    async def _do_search(self, query):
+        try:
+            client = await self._ensure_client()
+            results = []
+            async for result in client.search(query):
+                results.append(result)
+                if len(results) >= 50:
+                    break
+            self.results_found.emit(results)
+        except Exception as e:
+            self.service_error.emit(str(e))
+
+    async def _do_download(self, user, filename):
+        try:
+            client = await self._ensure_client()
+            transfer = await client.transfer_manager.download(user, filename)
+
+            # Monitor progress
+            while not transfer.state.is_complete:
+                 # Check for failures
+                 if transfer.state.is_aborted or transfer.state.is_failed:
+                      self.service_error.emit(f"Download failed: {filename}")
+                      return
+                 await asyncio.sleep(1)
+
+            if transfer.local_path:
+                 self.download_complete.emit(transfer.local_path)
+        except Exception as e:
+            self.service_error.emit(str(e))
+
+
+# Soulseek Search Dialog
+class SoulseekSearchDialog(QtWidgets.QDialog):
+    def __init__(self, parent, initial_query):
+        super().__init__(parent)
+        self.setWindowTitle(_("Soulseek Search"))
+        self.resize(800, 400)
+        self.layout = QtWidgets.QVBoxLayout(self)
+
+        # Search Input
+        self.search_layout = QtWidgets.QHBoxLayout()
+        self.query_edit = QtWidgets.QLineEdit(initial_query)
+        self.search_button = QtWidgets.QPushButton(_("Search"))
+        self.search_button.clicked.connect(self.start_search)
+        self.search_layout.addWidget(self.query_edit)
+        self.search_layout.addWidget(self.search_button)
+        self.layout.addLayout(self.search_layout)
+
+        # Results List
+        self.results_list = QtWidgets.QTreeWidget()
+        self.results_list.setHeaderLabels([_("Filename"), _("User"), _("Size"), _("Speed"), _("In Queue")])
+        self.results_list.itemDoubleClicked.connect(self.start_download)
+        self.layout.addWidget(self.results_list)
+
+        # Status
+        self.status_label = QtWidgets.QLabel(_("Ready. Double-click a result to download."))
+        self.layout.addWidget(self.status_label)
+
+        # Service Setup
+        self.service = SoulseekService.instance()
+        self.service.results_found.connect(self.display_results)
+        self.service.download_complete.connect(self.on_download_complete)
+        self.service.service_error.connect(self.on_error)
+
+        # Configure service
+        username = config.setting['soulseek_username']
+        password = config.setting['soulseek_password']
+        download_dir = config.setting['soulseek_download_dir']
+        self.service.configure(username, password, download_dir)
+        self.service.start_service()
+
+    def start_search(self):
+        query = self.query_edit.text()
+        self.results_list.clear()
+        self.status_label.setText(_("Searching..."))
+        self.search_button.setEnabled(False)
+        self.service.perform_search(query)
+
+    def display_results(self, results):
+        self.search_button.setEnabled(True)
+        if not results:
+             self.status_label.setText(_("No results found."))
+             return
+
+        for res in results:
+            try:
+                filename = getattr(res, 'filename', str(res))
+                user = getattr(res, 'user', 'Unknown')
+                size = str(getattr(res, 'size', 0))
+                speed = str(getattr(res, 'speed', 0))
+                slots = str(getattr(res, 'slots', '?'))
+
+                item = QtWidgets.QTreeWidgetItem([filename, user, size, speed, slots])
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, filename)
+                item.setData(1, QtCore.Qt.ItemDataRole.UserRole, user)
+                self.results_list.addTopLevelItem(item)
+            except:
+                continue
+        self.status_label.setText(_("Found {} results").format(len(results)))
+
+    def start_download(self, item, column):
+        filename = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        user = item.data(1, QtCore.Qt.ItemDataRole.UserRole)
+
+        if not config.setting['soulseek_download_dir']:
+             QtWidgets.QMessageBox.warning(self, _("Config Error"), _("Please set a download directory in Options."))
+             return
+
+        self.status_label.setText(_("Downloading: {}").format(filename))
+        self.service.perform_download(user, filename)
+
+    def on_download_complete(self, path):
+        self.status_label.setText(_("Download Complete: {}").format(path))
+        # Add to Picard
+        tagger = Tagger.instance()
+        tagger.add_files([path])
+        QtWidgets.QMessageBox.information(self, _("Download Complete"), _("File downloaded and added to Picard:\n{}").format(path))
+
+    def on_error(self, msg):
+        self.status_label.setText(_("Error: {}").format(msg))
+        self.search_button.setEnabled(True)
+
+
+# Context Menu Action
 class SearchSoulseek(BaseAction):
     NAME = 'Search on Soulseek'
 
@@ -252,11 +529,24 @@ class SearchSoulseek(BaseAction):
         tagger = Tagger.instance()
         artist = album.metadata['albumartist']
         title = album.metadata['album']
-        if artist and title:
-             query = f"{artist} {title}"
-             QtWidgets.QApplication.clipboard().setText(query)
-             tagger.window.statusBar().showMessage(f"Copied to clipboard: {query}", 5000)
-        else:
+
+        if not artist or not title:
              log.warning("Soulseek search: Missing artist or album title.")
+             return
+
+        query = f"{artist} {title}"
+        username = config.setting['soulseek_username']
+        password = config.setting['soulseek_password']
+
+        if HAS_AIOSLSK and username and password:
+            dialog = SoulseekSearchDialog(tagger.window, query)
+            dialog.exec()
+        else:
+            # Fallback
+            QtWidgets.QApplication.clipboard().setText(query)
+            msg = f"Copied to clipboard: {query}"
+            if HAS_AIOSLSK and (not username or not password):
+                msg += " (Configure credentials in Options for native search)"
+            tagger.window.statusBar().showMessage(msg, 5000)
 
 register_album_action(SearchSoulseek())
