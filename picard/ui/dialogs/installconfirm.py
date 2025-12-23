@@ -18,16 +18,18 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
-
 from PyQt6 import QtCore, QtWidgets
 
 from picard.i18n import gettext as _
 
+from picard.ui import PicardDialog
 from picard.ui.widgets.refselector import RefSelectorWidget
 
 
-class InstallConfirmDialog(QtWidgets.QDialog):
+class InstallConfirmDialog(PicardDialog):
     """Dialog for confirming plugin installation with trust warnings and ref selection."""
+
+    defaultsize = QtCore.QSize(500, 400)
 
     def __init__(self, plugin_name, url, parent=None, plugin_uuid=None, current_ref=None):
         super().__init__(parent)
@@ -38,12 +40,11 @@ class InstallConfirmDialog(QtWidgets.QDialog):
         self.selected_ref = None
 
         # Cache plugin manager for performance
-        tagger = QtCore.QCoreApplication.instance()
-        self.plugin_manager = tagger.get_plugin_manager()
+        self.plugin_manager = self.tagger.get_plugin_manager()
 
         self.setWindowTitle(_("Confirm Plugin Installation"))
         self.setModal(True)
-        self.resize(500, 400)
+        self.setMinimumSize(500, 300)
         self.setup_ui()
         self.check_trust_and_blacklist()
         self.load_refs()
@@ -79,18 +80,13 @@ class InstallConfirmDialog(QtWidgets.QDialog):
         layout.addWidget(ref_group)
 
         # Buttons
-        button_layout = QtWidgets.QHBoxLayout()
-
+        button_box = QtWidgets.QDialogButtonBox()
         self.install_button = QtWidgets.QPushButton(_("Yes, Install!"))
-        self.install_button.clicked.connect(self._confirm_install)
-        self.install_button.setDefault(True)
-        button_layout.addWidget(self.install_button)
-
-        cancel_button = QtWidgets.QPushButton(_("Cancel"))
-        cancel_button.clicked.connect(self.reject)
-        button_layout.addWidget(cancel_button)
-
-        layout.addLayout(button_layout)
+        button_box.addButton(self.install_button, QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole)
+        button_box.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self._confirm_install)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
 
     def check_trust_and_blacklist(self):
         """Check trust level and blacklist status."""

@@ -29,7 +29,8 @@ from test.test_plugins3_helpers import (
 )
 
 from picard.git.factory import has_git_backend
-from picard.plugin3.manager import UpdateResult
+from picard.plugin3.manager.update import UpdateResult
+from picard.plugin3.ref_item import RefItem
 
 
 def create_mock_registry_plugin(data):
@@ -188,7 +189,7 @@ class TestPluginCLI(PicardTestCase):
         """Test that update CLI commands are properly routed."""
         mock_plugin = MockPlugin()
         mock_manager = MockPluginManager(plugins=[mock_plugin])
-        mock_manager.check_updates = Mock(return_value=[])
+        mock_manager.check_updates = Mock(return_value={})
         mock_manager.update_all_plugins = Mock(return_value=[])
 
         # Test --check-updates
@@ -224,8 +225,8 @@ class TestPluginCLI(PicardTestCase):
                 new_version='1.1.0',
                 old_commit='abc1234567890',
                 new_commit='def9876543210',
-                old_ref=None,
-                new_ref=None,
+                old_ref_item=RefItem('v1.0.0', RefItem.Type.TAG, 'abc1234567890'),
+                new_ref_item=RefItem('v1.1.0', RefItem.Type.TAG, 'def9876543210'),
                 commit_date=1234567890,
             )
         )
@@ -245,7 +246,7 @@ class TestPluginCLI(PicardTestCase):
         manager._plugins = []
 
         updates = manager.check_updates()
-        self.assertEqual(updates, [])
+        self.assertEqual(updates, {})
 
     def test_clean_config_command(self):
         """Test --clean-config command."""
@@ -276,7 +277,8 @@ class TestPluginCLI(PicardTestCase):
 
             mock_manager = PluginManager(Mock())
             with (
-                patch('picard.plugin3.manager.get_config', return_value=test_config),
+                patch('picard.plugin3.manager.lifecycle.get_config', return_value=test_config),
+                patch('picard.plugin3.manager.clean.get_config', return_value=test_config),
                 patch('picard.plugin3.cli.get_config', return_value=test_config),
             ):
                 exit_code, stdout, _ = run_cli(mock_manager, clean_config=test_uuid, yes=True)

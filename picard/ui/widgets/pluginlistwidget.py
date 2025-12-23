@@ -28,6 +28,7 @@ from picard.config import get_config
 from picard.i18n import gettext as _
 from picard.plugin3.asyncops.manager import AsyncPluginManager
 from picard.plugin3.plugin import PluginState
+from picard.plugin3.ref_item import RefItem
 from picard.util import temporary_disconnect
 
 from picard.ui.dialogs.installconfirm import InstallConfirmDialog
@@ -93,11 +94,8 @@ class PluginListWidget(QtWidgets.QTreeWidget):
         # Guard to prevent double refresh during operations
         self._refreshing = False
 
-        # Cache update status to avoid repeated network calls during search
-        self._update_status_cache = {}
-
-        # Cache version info to avoid repeated expensive calls
-        self._version_cache = {}
+        # Updates dict from options page (plugin_id -> UpdateCheck)
+        self._updates = {}
 
         # Don't load cached update status during initialization to avoid any network activity
         # It will be loaded when actually needed during populate_plugins()
@@ -134,11 +132,7 @@ class PluginListWidget(QtWidgets.QTreeWidget):
             item.setTextAlignment(COLUMN_ENABLED, QtCore.Qt.AlignmentFlag.AlignCenter)
 
             # Column 1: Plugin name
-            try:
-                plugin_name = plugin.manifest.name_i18n()
-            except (AttributeError, Exception):
-                plugin_name = plugin.name or plugin.plugin_id
-            item.setText(COLUMN_PLUGIN, plugin_name)
+            item.setText(COLUMN_PLUGIN, plugin.name())
 
             # Add tooltip with description if available
             try:
@@ -163,15 +157,16 @@ class PluginListWidget(QtWidgets.QTreeWidget):
         self._update_header_button()
 
         # Update do not update list to match installed plugins list
-        self._resync_do_not_update(installed_plugins_uuids)
+        installed_plugins_ids = {plugin.plugin_id for plugin in plugins}
+        self._resync_do_not_update(installed_plugins_ids)
 
-    def _resync_do_not_update(self, uuid_set):
+    def _resync_do_not_update(self, plugin_id_set):
         """Resync do not update persist list with installed plugins list"""
         # A plugin could have been removed by another mean, so this ensures we removed old entries
         config = get_config()
-        do_not_update = set(config.persist['plugins3_do_not_update_plugins'])
-        resynced_do_not_update = do_not_update.intersection(uuid_set)
-        config.persist['plugins3_do_not_update_plugins'] = list(resynced_do_not_update)
+        do_not_update = set(config.persist['plugins3_do_not_update'])
+        resynced_do_not_update = do_not_update.intersection(plugin_id_set)
+        config.persist['plugins3_do_not_update'] = list(resynced_do_not_update)
 
     def _is_plugin_enabled(self, plugin):
         """Check if plugin is enabled."""
@@ -180,10 +175,6 @@ class PluginListWidget(QtWidgets.QTreeWidget):
     def _get_plugin_remote_url(self, plugin):
         """Get plugin remote URL from metadata."""
         return self.plugin_manager.get_plugin_remote_url(plugin)
-
-    def _format_git_info(self, metadata):
-        """Format git information for display."""
-        return self.plugin_manager.get_plugin_git_info(metadata)
 
     def _get_clean_version_display(self, plugin):
         """Get display text for plugin version without update suffix."""
@@ -202,10 +193,10 @@ class PluginListWidget(QtWidgets.QTreeWidget):
             # Show in progress for updating plugins
             item.setText(COLUMN_UPDATE, _("In Progress..."))
             item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsUserCheckable)
-        elif self._has_update_available_cached(plugin):
+        elif self._has_update_available(plugin):
             # Get new version info from cache first to avoid expensive calls during updates
             try:
-                new_version = self._get_cached_new_version(plugin)
+                new_version = self._get_new_version(plugin)
                 item.setText(COLUMN_UPDATE, new_version)
             except Exception:
                 item.setText(COLUMN_UPDATE, _("Available"))
@@ -215,9 +206,9 @@ class PluginListWidget(QtWidgets.QTreeWidget):
 
             # Check if user has previously unchecked this plugin
             config = get_config()
-            do_not_update = config.persist['plugins3_do_not_update_plugins']
+            do_not_update = config.persist['plugins3_do_not_update']
 
-            if plugin.uuid and plugin.uuid in do_not_update:
+            if plugin.plugin_id in do_not_update:
                 item.setCheckState(COLUMN_UPDATE, QtCore.Qt.CheckState.Unchecked)
                 self._set_update_checkbox_tooltip(item, False)
             else:
@@ -228,37 +219,37 @@ class PluginListWidget(QtWidgets.QTreeWidget):
             item.setText(COLUMN_UPDATE, "                   ")  # hacky
             item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsUserCheckable)
 
-    def _get_cached_new_version(self, plugin):
-        """Get new version from cache or compute if not cached."""
-        # Return cached version if available
-        if plugin.plugin_id in self._version_cache:
-            return self._version_cache[plugin.plugin_id]
-
-        # Compute and cache the version
-        new_version = self._get_new_version(plugin)
-        self._version_cache[plugin.plugin_id] = new_version
-        return new_version
-
     def _format_update_version(self, update):
         """Format update version info for display (matching git info format)."""
-        from picard.git.utils import RefItem
+        # Use the new RefItem directly from UpdateResult
+        new_ref_item = getattr(update, 'new_ref_item', None)
+        if new_ref_item:
+            return new_ref_item.format() or _("Available")
 
+        # Fallback for old UpdateResult format (backward compatibility)
         ref = getattr(update, 'new_ref', None) or getattr(update, 'old_ref', 'main')
         commit = getattr(update, 'new_commit', None)
 
-        ref_item = RefItem(name=ref, commit=commit)
+        # Create RefItem object for formatting - we need to guess the ref type
+        if ref:
+            # Try to determine ref type from name pattern
+            if ref.startswith('v') or '.' in ref:
+                ref_type = RefItem.Type.TAG
+            else:
+                ref_type = RefItem.Type.BRANCH
+        else:
+            # Just a commit hash
+            ref = commit
+            ref_type = RefItem.Type.COMMIT
+
+        ref_item = RefItem(shortname=ref, ref_type=ref_type, commit=commit)
         return ref_item.format() or _("Available")
 
     def _get_new_version(self, plugin):
         """Get the new version available for update."""
-        try:
-            # Get update info from check_updates
-            updates = self.plugin_manager.check_updates()
-            for update in updates:
-                if update.plugin_id == plugin.plugin_id:
-                    return self._format_update_version(update)
-        except Exception:
-            pass
+        update = self._updates.get(plugin.plugin_id)
+        if update:
+            return self._format_update_version(update)
         return _("Available")
 
     def _update_header_button(self):
@@ -307,8 +298,6 @@ class PluginListWidget(QtWidgets.QTreeWidget):
         """Mark a plugin update as complete."""
         self._updating_plugins.discard(plugin.plugin_id)
         # Clear caches for updated plugin - it should no longer have updates available
-        self._version_cache.pop(plugin.plugin_id, None)
-        self._update_status_cache.pop(plugin.plugin_id, None)
         self._refresh_plugin_display(plugin)
 
     def _refresh_plugin_display(self, plugin):
@@ -336,63 +325,13 @@ class PluginListWidget(QtWidgets.QTreeWidget):
         super().resizeEvent(event)
         self._position_update_button()
 
-    def _load_cached_update_status(self):
-        """Load cached update status from disk - completely passive, no plugin access."""
-        # Don't access plugin_manager.plugins here as it might trigger cache updates
-        # Just load what's already in the cache file without triggering any operations
-        try:
-            cache = self.plugin_manager._refs_cache.load_cache()
-            update_cache = cache.get('update_status', {})
-            for plugin_id, entry in update_cache.items():
-                if isinstance(entry, dict) and 'has_update' in entry:
-                    self._update_status_cache[plugin_id] = entry['has_update']
-        except Exception:
-            # Silently ignore cache loading errors
-            pass
-
-    def refresh_update_status(self, force_network_check=False):
-        """Public method to refresh update status for all plugins.
-
-        Args:
-            force_network_check: If True, make network calls to check for updates.
-                                If False, only use cached data.
-        """
-        if force_network_check:
-            self._refresh_update_status()
-        else:
-            # Only refresh display with cached data, no network calls
-            self._refresh_cached_update_status()
-
-    def _has_update_available_cached(self, plugin):
-        """Check if plugin has update available using cache."""
-        return self._update_status_cache.get(plugin.plugin_id, False)
+    def set_updates(self, updates):
+        """Set the updates dict from the options page."""
+        self._updates = updates
 
     def _has_update_available(self, plugin):
         """Check if plugin has update available."""
-        # This is only called from context menu, so network call is acceptable
-        return self.plugin_manager.get_plugin_update_status(plugin)
-
-    def _refresh_cached_update_status(self):
-        """Refresh update status using only cached data - no network calls."""
-        # Load cached update status from disk only when needed
-        self._load_cached_update_status()
-
-    def _refresh_update_status(self):
-        """Refresh update status for all plugins."""
-        self._update_status_cache.clear()
-        self._version_cache.clear()  # Clear version cache too
-        for plugin in self.plugin_manager.plugins:
-            self._refresh_single_plugin_update_status(plugin)
-
-    def _refresh_single_plugin_update_status(self, plugin):
-        """Refresh update status for a single plugin."""
-        try:
-            has_update = self.plugin_manager.get_plugin_update_status(plugin, force_refresh=True)
-            self._update_status_cache[plugin.plugin_id] = has_update
-        except Exception as e:
-            log.debug("get_plugin_update_status() for %s failed: %s", plugin.plugin_id, e)
-            # Don't let update check failures break the UI
-            self._update_status_cache[plugin.plugin_id] = False
+        return plugin.plugin_id in self._updates
 
     def _on_selection_changed(self):
         """Handle selection changes."""
@@ -431,12 +370,10 @@ class PluginListWidget(QtWidgets.QTreeWidget):
                 except Exception as e:
                     # Show error dialog to user
                     log.error("Failed to toggle plugin %s: %s", plugin.plugin_id, e, exc_info=True)
-                    action = "enable" if target_enabled else "disable"
-                    QtWidgets.QMessageBox.critical(
-                        self,
-                        _("Plugin Error"),
-                        _("Failed to {} plugin '{}':\n\n{}").format(action, plugin.name or plugin.plugin_id, str(e)),
-                    )
+                    if target_enabled:
+                        self._enable_error_dialog(plugin, str(e))
+                    else:
+                        self._disable_error_dialog(plugin, str(e))
                     # Track failed enable attempts
                     if target_enabled and "Already declared" in str(e):
                         self._failed_enables.add(plugin.plugin_id)
@@ -463,42 +400,26 @@ class PluginListWidget(QtWidgets.QTreeWidget):
         elif column == COLUMN_UPDATE:  # Handle update checkbox
             # Save checkbox state preference
             plugin = item.data(COLUMN_ENABLED, QtCore.Qt.ItemDataRole.UserRole)
-            if plugin and plugin.uuid:
+            if plugin:
                 config = get_config()
-                do_not_update = list(config.persist['plugins3_do_not_update_plugins'])
+                do_not_update = list(config.persist['plugins3_do_not_update'])
 
                 is_checked = item.checkState(COLUMN_UPDATE) == QtCore.Qt.CheckState.Checked
 
                 # Update tooltip based on new state
                 self._set_update_checkbox_tooltip(item, is_checked)
 
-                if not is_checked and plugin.uuid not in do_not_update:
+                if not is_checked and plugin.plugin_id not in do_not_update:
                     # User unchecked - add to do not update list
-                    do_not_update.append(plugin.uuid)
-                    config.persist['plugins3_do_not_update_plugins'] = do_not_update
-                elif is_checked and plugin.uuid in do_not_update:
+                    do_not_update.append(plugin.plugin_id)
+                    config.persist['plugins3_do_not_update'] = do_not_update
+                elif is_checked and plugin.plugin_id in do_not_update:
                     # User checked - remove from do not update list
-                    do_not_update.remove(plugin.uuid)
-                    config.persist['plugins3_do_not_update_plugins'] = do_not_update
+                    do_not_update.remove(plugin.plugin_id)
+                    config.persist['plugins3_do_not_update'] = do_not_update
 
             # Update header button when update checkboxes change
             self._update_header_button()
-
-    def _update_item_to_intended_state(self, item, enabled):
-        """Update item display to show intended state."""
-        item.setCheckState(COLUMN_ENABLED, QtCore.Qt.CheckState.Checked if enabled else QtCore.Qt.CheckState.Unchecked)
-
-    def _update_item_display(self, item, plugin):
-        """Update display for a specific item."""
-        item.setCheckState(
-            COLUMN_ENABLED,
-            QtCore.Qt.CheckState.Checked if self._is_plugin_enabled(plugin) else QtCore.Qt.CheckState.Unchecked,
-        )
-
-    def _clear_toggle_and_refresh(self, plugin_id):
-        """Clear toggle state and refresh plugin list."""
-        self._toggling_plugins.discard(plugin_id)
-        self._refresh_plugin_list()
 
     def _refresh_plugin_list(self):
         """Refresh the plugin list to reflect current state."""
@@ -578,6 +499,20 @@ class PluginListWidget(QtWidgets.QTreeWidget):
         # Show menu
         menu.exec(self.mapToGlobal(position))
 
+    def _enable_error_dialog(self, plugin, errmsg):
+        QtWidgets.QMessageBox.critical(
+            self,
+            _("Plugin Error"),
+            _("Failed to enable plugin '{}':\n{}").format(plugin.name(), errmsg),
+        )
+
+    def _disable_error_dialog(self, plugin, errmsg):
+        QtWidgets.QMessageBox.critical(
+            self,
+            _("Plugin Error"),
+            _("Failed to disable plugin '{}':\n{}").format(plugin.name(), errmsg),
+        )
+
     def _toggle_plugin_from_menu(self, plugin, enabled):
         """Toggle plugin from context menu."""
         try:
@@ -589,13 +524,10 @@ class PluginListWidget(QtWidgets.QTreeWidget):
             self.plugin_state_changed.emit(plugin, action)
         except Exception as e:
             # Show error message
-            QtWidgets.QMessageBox.critical(
-                self,
-                _("Plugin Error"),
-                _("Failed to {} plugin '{}': {}").format(
-                    _("enable") if enabled else _("disable"), plugin.name or plugin.plugin_id, str(e)
-                ),
-            )
+            if enabled:
+                self._enable_error_dialog(plugin, str(e))
+            else:
+                self._disable_error_dialog(plugin, str(e))
 
     def _update_plugin_from_menu(self, plugin):
         """Update plugin from context menu."""
@@ -604,27 +536,36 @@ class PluginListWidget(QtWidgets.QTreeWidget):
             plugin=plugin, progress_callback=None, callback=partial(self._on_context_update_complete, plugin)
         )
 
+    def _update_error_dialog(self, plugin, errmsg):
+        QtWidgets.QMessageBox.critical(
+            self,
+            _("Plugin Error"),
+            _("Failed to update plugin '{}':\n{}").format(plugin.name(), errmsg),
+        )
+
     def _on_context_update_complete(self, plugin, result):
         """Handle context menu update completion."""
         if result.success:
-            # Clear version cache for updated plugin
-            self._version_cache.pop(plugin.plugin_id, None)
-
-            # Refresh update status for the specific plugin since it was updated
-            self._refresh_single_plugin_update_status(plugin)
-
             # Refresh the plugin list
             self.populate_plugins(self.plugin_manager.plugins)
-            # Emit signal for options dialog to refresh
+            # Emit signal for options dialog to refresh and update updates dict
             self.plugin_state_changed.emit(plugin, "updated")
         else:
             error_msg = str(result.error) if result.error else _("Unknown error")
-            QtWidgets.QMessageBox.critical(self, _("Update Failed"), error_msg)
+            self._update_error_dialog(plugin, error_msg)
+
+    def _uninstall_error_dialog(self, plugin, errmsg):
+        QtWidgets.QMessageBox.critical(
+            self,
+            _("Plugin Error"),
+            _("Failed to uninstall plugin '{}':\n{}").format(plugin.name(), errmsg),
+        )
 
     def _uninstall_plugin_from_menu(self, plugin):
         """Uninstall plugin from context menu."""
         dialog = UninstallPluginDialog(plugin, self)
-        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+        dialog.exec()
+        if dialog.uninstall_confirmed:
             try:
                 async_manager = AsyncPluginManager(self.plugin_manager)
                 async_manager.uninstall_plugin(
@@ -632,19 +573,24 @@ class PluginListWidget(QtWidgets.QTreeWidget):
                 )
             except Exception as e:
                 log.error("Failed to uninstall plugin %s: %s", plugin.plugin_id, e, exc_info=True)
-                QtWidgets.QMessageBox.critical(
-                    self, _("Uninstall Failed"), _("Failed to uninstall plugin: {}").format(str(e))
-                )
+                self._uninstall_error_dialog(plugin, str(e))
 
     def _on_uninstall_complete(self, plugin, result):
         """Handle uninstall completion."""
         if result.success:
             self._refresh_plugin_list()
-            # Emit signal for options dialog to refresh
+            # Emit signal for options dialog to refresh and update updates dict
             self.plugin_state_changed.emit(plugin, "uninstalled")
         else:
             error_msg = str(result.error) if result.error else _("Unknown error")
-            QtWidgets.QMessageBox.critical(self, _("Uninstall Failed"), error_msg)
+            self._uninstall_error_dialog(plugin, error_msg)
+
+    def _reinstall_error_dialog(self, plugin, errmsg):
+        QtWidgets.QMessageBox.critical(
+            self,
+            _("Plugin Error"),
+            _("Failed to reinstall plugin '{}':\n{}").format(plugin.name(), errmsg),
+        )
 
     def _reinstall_plugin_from_menu(self, plugin):
         """Reinstall plugin from context menu."""
@@ -653,15 +599,9 @@ class PluginListWidget(QtWidgets.QTreeWidget):
             uuid = self.plugin_manager._get_plugin_uuid(plugin)
             metadata = self.plugin_manager._get_plugin_metadata(uuid)
             if not (metadata and hasattr(metadata, 'url')):
-                QtWidgets.QMessageBox.critical(self, _("Reinstall Failed"), _("Could not find plugin repository URL"))
+                self._reinstall_error_dialog(plugin, _("Could not find plugin repository URL"))
                 return
             plugin_url = metadata.url
-
-            # Get plugin name
-            try:
-                plugin_name = plugin.manifest.name_i18n()
-            except (AttributeError, Exception):
-                plugin_name = plugin.name or plugin.plugin_id
 
             # Get current ref for reinstall
             current_ref = None
@@ -673,32 +613,37 @@ class PluginListWidget(QtWidgets.QTreeWidget):
                 pass
 
             # Show confirmation dialog
-            confirm_dialog = InstallConfirmDialog(plugin_name, plugin_url, self, plugin.uuid, current_ref)
+            confirm_dialog = InstallConfirmDialog(plugin.name(), plugin_url, self, plugin.uuid, current_ref)
             if confirm_dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
                 return
 
             async_manager = AsyncPluginManager(self.plugin_manager)
             async_manager.install_plugin(
                 url=plugin_url,
-                ref=confirm_dialog.selected_ref.name if confirm_dialog.selected_ref else None,
+                ref=confirm_dialog.selected_ref.shortname if confirm_dialog.selected_ref else None,
                 reinstall=True,
                 callback=partial(self._on_reinstall_complete, plugin),
             )
         except Exception as e:
             log.error("Failed to reinstall plugin %s: %s", plugin.plugin_id, e, exc_info=True)
-            QtWidgets.QMessageBox.critical(
-                self, _("Reinstall Failed"), _("Failed to reinstall plugin: {}").format(str(e))
-            )
+            self._reinstall_error_dialog(plugin, str(e))
 
     def _on_reinstall_complete(self, plugin, result):
         """Handle reinstall completion."""
         if result.success:
             self._refresh_plugin_list()
-            # Emit signal for options dialog to refresh
+            # Emit signal for options dialog to refresh and update updates dict
             self.plugin_state_changed.emit(plugin, "reinstalled")
         else:
             error_msg = str(result.error) if result.error else _("Unknown error")
-            QtWidgets.QMessageBox.critical(self, _("Reinstall Failed"), error_msg)
+            self._reinstall_error_dialog(plugin, error_msg)
+
+    def _switch_ref_error_dialog(self, plugin, errmsg):
+        QtWidgets.QMessageBox.critical(
+            self,
+            _("Plugin Error"),
+            _("Failed to switch ref for plugin '{}':\n{}").format(plugin.name(), errmsg),
+        )
 
     def _switch_ref_from_menu(self, plugin):
         """Switch plugin ref from context menu."""
@@ -708,28 +653,23 @@ class PluginListWidget(QtWidgets.QTreeWidget):
                 async_manager = AsyncPluginManager(self.plugin_manager)
                 async_manager.switch_ref(
                     plugin=plugin,
-                    ref=dialog.selected_ref.name if dialog.selected_ref else None,
+                    ref=dialog.selected_ref.shortname if dialog.selected_ref else None,
                     callback=partial(self._on_switch_ref_complete, plugin),
                 )
             except Exception as e:
                 log.error("Failed to switch ref for plugin %s: %s", plugin.plugin_id, e, exc_info=True)
-                QtWidgets.QMessageBox.critical(
-                    self, _("Switch Ref Failed"), _("Failed to switch ref: {}").format(str(e))
-                )
+                self._switch_ref_error_dialog(plugin, str(e))
 
     def _on_switch_ref_complete(self, plugin, result):
         """Handle switch ref completion."""
         if result.success:
-            # Refresh update status for the specific plugin since ref changed
-            self._refresh_single_plugin_update_status(plugin)
-
             # Only refresh the display for this specific plugin, not all plugins
             self._refresh_plugin_display(plugin)
-            # Emit signal for options dialog to refresh
+            # Emit signal for options dialog to refresh and update updates dict
             self.plugin_state_changed.emit(plugin, "ref switched")
         else:
             error_msg = str(result.error) if result.error else _("Unknown error")
-            QtWidgets.QMessageBox.critical(self, _("Switch Ref Failed"), error_msg)
+            self._switch_ref_error_dialog(plugin, error_msg)
 
     def _on_plugin_ref_switched(self, plugin):
         """Handle plugin ref switched signal."""
@@ -747,55 +687,38 @@ class PluginListWidget(QtWidgets.QTreeWidget):
         dialog.exec()
 
 
-class UninstallPluginDialog(QtWidgets.QDialog):
+class UninstallPluginDialog(QtWidgets.QMessageBox):
     """Dialog for uninstalling plugins with purge option."""
 
     def __init__(self, plugin, parent=None):
         super().__init__(parent)
         self.plugin = plugin
-        self.purge_config = False
         self.setWindowTitle(_("Uninstall Plugin"))
-        self.setModal(True)
         self.setup_ui()
 
     def setup_ui(self):
         """Setup the dialog UI."""
-        layout = QtWidgets.QVBoxLayout(self)
-
-        # Plugin name
-        try:
-            name = self.plugin.manifest.name_i18n()
-        except (AttributeError, Exception):
-            name = self.plugin.name or self.plugin.plugin_id
+        self.setIcon(QtWidgets.QMessageBox.Icon.Warning)
 
         # Confirmation message
-        message = QtWidgets.QLabel(_("Are you sure you want to uninstall '{}'?").format(name))
-        message.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        message.setWordWrap(True)
-        layout.addWidget(message)
+        self.setText(_("Are you sure you want to uninstall '{}'?").format(self.plugin.name()))
 
         # Purge configuration checkbox
-        self.purge_checkbox = QtWidgets.QCheckBox(_("Also remove plugin configuration"))
-        self.purge_checkbox.setToolTip(_("Remove all saved settings and configuration for this plugin"))
-        layout.addWidget(self.purge_checkbox)
+        self._purge_checkbox = QtWidgets.QCheckBox(_("Also remove plugin configuration"))
+        self._purge_checkbox.setToolTip(_("Remove all saved settings and configuration for this plugin"))
+        self.setCheckBox(self._purge_checkbox)
 
         # Buttons
-        button_layout = QtWidgets.QHBoxLayout()
+        self._btn_confirm_uninstall = self.addButton(_("Yes, Uninstall!"), QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        self.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
 
-        uninstall_button = QtWidgets.QPushButton(_("Yes, Uninstall!"))
-        uninstall_button.clicked.connect(self._uninstall)
-        button_layout.addWidget(uninstall_button)
+    @property
+    def purge_config(self) -> bool:
+        return self._purge_checkbox.isChecked()
 
-        cancel_button = QtWidgets.QPushButton(_("Cancel"))
-        cancel_button.clicked.connect(self.reject)
-        button_layout.addWidget(cancel_button)
-
-        layout.addLayout(button_layout)
-
-    def _uninstall(self):
-        """Handle uninstall button click."""
-        self.purge_config = self.purge_checkbox.isChecked()
-        self.accept()
+    @property
+    def uninstall_confirmed(self) -> bool:
+        return self.clickedButton() == self._btn_confirm_uninstall
 
 
 class SwitchRefDialog(QtWidgets.QDialog):
@@ -813,6 +736,7 @@ class SwitchRefDialog(QtWidgets.QDialog):
         self.setWindowTitle(_("Switch Git Ref"))
         self.setModal(True)
         self.resize(400, 300)
+        self.setMinimumSize(400, 300)
         self.setup_ui()
         self.load_refs()
 
@@ -820,13 +744,7 @@ class SwitchRefDialog(QtWidgets.QDialog):
         """Setup the dialog UI."""
         layout = QtWidgets.QVBoxLayout(self)
 
-        # Plugin name
-        try:
-            name = self.plugin.manifest.name_i18n()
-        except (AttributeError, Exception):
-            name = self.plugin.name or self.plugin.plugin_id
-
-        title_label = QtWidgets.QLabel(_("Switch ref for '{}'").format(name))
+        title_label = QtWidgets.QLabel(_("Switch ref for '{}'").format(self.plugin.name()))
         title_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(title_label)
 
@@ -835,17 +753,13 @@ class SwitchRefDialog(QtWidgets.QDialog):
         layout.addWidget(self.ref_selector)
 
         # Buttons
-        button_layout = QtWidgets.QHBoxLayout()
-
-        switch_button = QtWidgets.QPushButton(_("Yes, Switch!"))
-        switch_button.clicked.connect(self._switch_ref)
-        button_layout.addWidget(switch_button)
-
-        cancel_button = QtWidgets.QPushButton(_("Cancel"))
-        cancel_button.clicked.connect(self.reject)
-        button_layout.addWidget(cancel_button)
-
-        layout.addLayout(button_layout)
+        button_box = QtWidgets.QDialogButtonBox()
+        self.install_button = QtWidgets.QPushButton(_("Yes, Switch!"))
+        button_box.addButton(self.install_button, QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole)
+        button_box.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self._switch_ref)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
 
     def load_refs(self):
         """Load available refs from repository."""
@@ -867,7 +781,11 @@ class SwitchRefDialog(QtWidgets.QDialog):
         if self.selected_ref:
             self.accept()
         else:
-            QtWidgets.QMessageBox.warning(self, _("No Ref Selected"), _("Please select or enter a ref to switch to."))
+            QtWidgets.QMessageBox.warning(
+                self,
+                _("No Ref Selected"),
+                _("Please select or enter a ref to switch to."),
+            )
 
     def _uninstall(self):
         """Handle uninstall button click."""

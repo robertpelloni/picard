@@ -23,15 +23,13 @@ from PyQt6 import QtCore, QtWidgets
 
 from picard.i18n import gettext as _
 
-
-try:
-    from markdown import markdown as render_markdown
-except ImportError:
-    render_markdown = None
+from picard.ui import PreserveGeometry
 
 
-class PluginInfoDialog(QtWidgets.QDialog):
+class PluginInfoDialog(QtWidgets.QDialog, PreserveGeometry):
     """Dialog showing detailed plugin information for both registry and installed plugins."""
+
+    defaultsize = QtCore.QSize(600, 500)
 
     def __init__(self, plugin_data, parent=None):
         super().__init__(parent)
@@ -43,8 +41,12 @@ class PluginInfoDialog(QtWidgets.QDialog):
 
         self.setWindowTitle(_("Plugin Information"))
         self.setModal(True)
-        self.resize(600, 500)
+        self.setMinimumSize(500, 300)
         self.setup_ui()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.restore_geometry()
 
     @property
     def plugin_data(self):
@@ -116,34 +118,31 @@ class PluginInfoDialog(QtWidgets.QDialog):
         description = self._get_description()
         if description:
             desc_label = QtWidgets.QLabel(_("Description:"))
+            font = desc_label.font()
+            font.setBold(True)
+            desc_label.setFont(font)
             content_layout.addWidget(desc_label)
 
-            desc_text = QtWidgets.QTextBrowser()
+            desc_text = QtWidgets.QLabel()
+            desc_text.setTextFormat(QtCore.Qt.TextFormat.MarkdownText)
+            desc_text.setText(description.rstrip())
             desc_text.setMinimumHeight(50)
-            if render_markdown:
-                html_desc = render_markdown(description.rstrip(), output_format='html')
-                desc_text.setHtml(html_desc)
-            else:
-                desc_text.setPlainText(description.rstrip())
-
+            desc_text.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+            desc_text.setOpenExternalLinks(True)
+            desc_text.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.MinimumExpanding
+            )
             content_layout.addWidget(desc_text)
-
-        # vertical_spacer = QtWidgets.QSpacerItem(20, 40, QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Expanding)
-        content_layout.addStretch()
 
         # Set content widget to scroll area and add to main layout
         scroll_area.setWidget(content_widget)
         layout.addWidget(scroll_area)
 
         # Close button
-        button_layout = QtWidgets.QHBoxLayout()
-        button_layout.addStretch()
-
-        close_button = QtWidgets.QPushButton(_("Close"))
-        close_button.clicked.connect(self.accept)
-        button_layout.addWidget(close_button)
-
-        layout.addLayout(button_layout)
+        button_box = QtWidgets.QDialogButtonBox()
+        button_box.addButton(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        button_box.rejected.connect(self.accept)
+        layout.addWidget(button_box)
 
     @staticmethod
     def _make_label():
@@ -227,7 +226,38 @@ class PluginInfoDialog(QtWidgets.QDialog):
             trust_level = getattr(self.plugin_data, 'trust_level', '')
             return trust_level.title() if trust_level else ''
         else:
-            return ''
+            # For installed plugins, use the plugin manager to get trust level
+            try:
+                registry = self.plugin_manager._registry
+                # Get remote URL from metadata
+                remote_url = self._get_plugin_remote_url()
+                if remote_url:
+                    trust_level = registry.get_trust_level(remote_url)
+                    return self._format_trust_level(trust_level)
+                # For local plugins without remote_url, show as Local
+                return _("Local")
+            except Exception:
+                return _("Unknown")
+
+    def _format_trust_level(self, trust_level):
+        """Format trust level for display."""
+        trust_map = {
+            "official": _("Official"),
+            "trusted": _("Trusted"),
+            "community": _("Community"),
+            "unregistered": _("Unregistered"),
+        }
+        return trust_map.get(trust_level, _("Unknown"))
+
+    def _get_plugin_remote_url(self):
+        """Get plugin remote URL from metadata."""
+        if self._is_installable_plugin():
+            return getattr(self.plugin_data, 'git_url', getattr(self.plugin_data, 'source_url', '')) or ''
+        else:
+            try:
+                return self.plugin_manager.get_plugin_remote_url(self.plugin_data) or '' if self.plugin_manager else ''
+            except (AttributeError, Exception):
+                return ''
 
     def _get_categories(self):
         """Get categories."""

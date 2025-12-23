@@ -71,16 +71,92 @@ class GitCredentialType(Enum):
     USERPASS = 2
 
 
+class GitRefType(Enum):
+    BRANCH = "branch"
+    TAG = "tag"
+    HEAD = "head"
+
+
 class GitRef:
-    def __init__(self, name: str, target: str = None):
+    def __init__(
+        self,
+        name: str,
+        target: str = None,
+        ref_type: GitRefType = None,
+        is_remote: bool = False,
+        is_annotated: bool = False,
+    ):
         self.name = name
         self.target = target
+        self.ref_type = ref_type
+        self.is_remote = is_remote
+        self.is_annotated = is_annotated
+        self.shortname = self._extract_shortname()
+
+    def _extract_shortname(self) -> str:
+        """Extract short name from full ref name"""
+        if self.name.startswith('refs/heads/'):
+            return self.name[11:]  # len('refs/heads/')
+        elif self.name.startswith('refs/tags/'):
+            return self.name[10:]  # len('refs/tags/')
+        elif self.name.startswith('refs/remotes/'):
+            return self.name[13:]  # len('refs/remotes/')
+        else:
+            return self.name  # HEAD, etc.
+
+    def to_tuple(self):
+        """Serialize GitRef to tuple for storage."""
+        return (
+            self.name,
+            self.target,
+            self.ref_type.value if self.ref_type else None,
+            self.is_remote,
+            self.is_annotated,
+        )
+
+    @classmethod
+    def from_tuple(cls, data):
+        """Deserialize GitRef from tuple."""
+        if not data or len(data) < 3:
+            return cls(name='', target='')
+
+        name, target, ref_type_str = data[:3]
+        is_remote = data[3] if len(data) > 3 else False
+        is_annotated = data[4] if len(data) > 4 else False
+
+        ref_type = None
+        if ref_type_str:
+            try:
+                ref_type = GitRefType(ref_type_str)
+            except ValueError:
+                pass  # Invalid ref_type, keep as None
+
+        return cls(
+            name=name or '',
+            target=target or '',
+            ref_type=ref_type,
+            is_remote=is_remote,
+            is_annotated=is_annotated,
+        )
+
+    def __repr__(self):
+        parts = [f"name='{self.name}'", f"target='{self.target}'"]
+        if self.ref_type:
+            parts.append(f"type={self.ref_type.value}")
+        if self.is_remote:
+            parts.append("remote=True")
+        if self.is_annotated:
+            parts.append("annotated=True")
+        return f"GitRef({', '.join(parts)})"
 
 
 class GitObject:
     def __init__(self, id: str, obj_type: GitObjectType):
         self.id = id
         self.type = obj_type
+
+    def __repr__(self):
+        return 'GitObject(%r, %r)' % (self.id, self.type)
 
 
 class GitRemoteCallbacks:
@@ -90,10 +166,16 @@ class GitRemoteCallbacks:
 def _log_git_call(method_name: str, *args, **kwargs):
     """Log git backend method calls if debug option enabled"""
     if DebugOpt.GIT_BACKEND.enabled:
+        has_retval = 'retval' in kwargs
+        if has_retval:
+            retval = kwargs.pop('retval')
         args_str = ', '.join(str(arg)[:100] for arg in args)  # Truncate long args
         kwargs_str = ', '.join(f'{k}={str(v)[:50]}' for k, v in kwargs.items())
         all_args = ', '.join(filter(None, [args_str, kwargs_str]))
-        log.debug("Git backend call: %s(%s)", method_name, all_args)
+        msg = "Git backend call: %s(%s)" % (method_name, all_args)
+        if has_retval:
+            msg += ' => %r' % retval
+        log.debug(msg)
 
 
 class GitRepository(ABC):
@@ -127,9 +209,19 @@ class GitRepository(ABC):
     def peel_to_commit(self, obj: GitObject) -> GitObject:
         """Peel tag to underlying commit"""
 
+    def revparse_to_commit(self, ref: str) -> GitObject:
+        """Resolve reference to commit, peeling tags if necessary"""
+        obj = self.revparse_single(ref)
+        return self.peel_to_commit(obj)
+
     @abstractmethod
     def reset(self, commit_id: str, mode: GitResetMode):
         """Reset repository to commit"""
+
+    def reset_to_commit(self, commit_id: str, hard: bool = False):
+        """Reset repository to commit with simplified API"""
+        mode = GitResetMode.HARD if hard else GitResetMode.HARD  # Only HARD mode is defined
+        self.reset(commit_id, mode)
 
     @abstractmethod
     def checkout_tree(self, obj: GitObject):
@@ -140,12 +232,8 @@ class GitRepository(ABC):
         """Set HEAD to target"""
 
     @abstractmethod
-    def list_references(self) -> list[str]:
+    def list_references(self) -> list[GitRef]:
         """List all references"""
-
-    @abstractmethod
-    def get_references(self) -> list[str]:
-        """Get list of reference names"""
 
     @abstractmethod
     def get_remotes(self) -> list[Any]:
@@ -172,8 +260,21 @@ class GitRepository(ABC):
         """Fetch from remote with optional refspec"""
 
     @abstractmethod
+    def fetch_remote_with_tags(self, remote, refspec: str = None, callbacks=None):
+        """Fetch from remote including tags"""
+
+    @abstractmethod
     def free(self):
         """Free repository resources"""
+
+    def __enter__(self):
+        """Context manager entry"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - always free resources"""
+        self.free()
+        return False
 
 
 class GitBackend(ABC):
@@ -233,7 +334,13 @@ class GitBackend(ABC):
 
     @abstractmethod
     def fetch_remote_refs(self, url: str, **options) -> Optional[list[GitRef]]:
-        """Fetch remote refs without cloning"""
+        """Fetch remote refs without cloning
+
+        Args:
+            url: Git repository URL
+            **options: Additional options including:
+                - repo_path: Optional Path to existing repository to use instead of creating temporary one
+        """
 
     @abstractmethod
     def create_remote_callbacks(self) -> GitRemoteCallbacks:

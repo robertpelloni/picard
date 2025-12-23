@@ -458,7 +458,7 @@ class ClusterItem(TreeItem):
         self.add_files([file])
 
     def add_files(self, files):
-        if self.obj.hide_if_empty and self.obj.files:
+        if not self.obj.is_permanently_hidden:
             self.setHidden(False)
         self.update()
         # addChild used (rather than building an items list and adding with addChildren)
@@ -473,7 +473,7 @@ class ClusterItem(TreeItem):
         file.ui_item.setSelected(False)
         self.removeChild(file.ui_item)
         self.update()
-        if self.obj.hide_if_empty and not self.obj.files:
+        if self.obj.is_permanently_hidden:
             self.setHidden(True)
 
 
@@ -651,10 +651,10 @@ class FileItem(TreeItem):
     def decide_file_icon_info(file):
         tooltip = ""
         if file.state == File.State.ERROR:
-            if File.State.ERROR_type == File.ErrorType.NOTFOUND:
+            if file.error_type == File.ErrorType.NOTFOUND:
                 icon = FileItem.icon_error_not_found
                 tooltip = _("File not found")
-            elif File.State.ERROR_type == File.ErrorType.NOACCESS:
+            elif file.error_type == File.ErrorType.NOACCESS:
                 icon = FileItem.icon_error_no_access
                 tooltip = _("File permission error")
             else:
