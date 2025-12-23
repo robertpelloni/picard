@@ -424,10 +424,26 @@ class SoulseekService(QtCore.QThread):
             self.service_error.emit(str(e))
 
 
+# Custom Tree Item for Numeric Sorting
+class SoulseekResultItem(QtWidgets.QTreeWidgetItem):
+    def __lt__(self, other):
+        column = self.treeWidget().sortColumn()
+        text1 = self.text(column)
+        text2 = other.text(column)
+
+        # Sort by numeric value for Size (2), Speed (3), and Queue (4)
+        if column in (2, 3, 4):
+            try:
+                return float(text1) < float(text2)
+            except ValueError:
+                return text1 < text2
+        return text1 < text2
+
 # Soulseek Search Dialog
 class SoulseekSearchDialog(QtWidgets.QDialog):
-    def __init__(self, parent, initial_query):
+    def __init__(self, parent, initial_query, target_album=None):
         super().__init__(parent)
+        self.target_album = target_album
         self.setWindowTitle(_("Soulseek Search"))
         self.resize(800, 400)
         self.layout = QtWidgets.QVBoxLayout(self)
@@ -443,7 +459,8 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
 
         # Results List
         self.results_list = QtWidgets.QTreeWidget()
-        self.results_list.setHeaderLabels([_("Filename"), _("User"), _("Size"), _("Speed"), _("In Queue")])
+        self.results_list.setHeaderLabels([_("Filename"), _("User"), _("Size (MB)"), _("Speed (kB/s)"), _("In Queue")])
+        self.results_list.setSortingEnabled(True)
         self.results_list.itemDoubleClicked.connect(self.start_download)
         self.layout.addWidget(self.results_list)
 
@@ -481,11 +498,18 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
             try:
                 filename = getattr(res, 'filename', str(res))
                 user = getattr(res, 'user', 'Unknown')
-                size = str(getattr(res, 'size', 0))
-                speed = str(getattr(res, 'speed', 0))
-                slots = str(getattr(res, 'slots', '?'))
 
-                item = QtWidgets.QTreeWidgetItem([filename, user, size, speed, slots])
+                size_bytes = getattr(res, 'size', 0)
+                size_mb = f"{size_bytes / (1024 * 1024):.2f}"
+
+                speed_bytes = getattr(res, 'speed', 0)
+                speed_kb = f"{speed_bytes / 1024:.0f}"
+
+                slots = str(getattr(res, 'slots', '?'))
+                if getattr(res, 'is_free', False):
+                    slots += " (Free)"
+
+                item = SoulseekResultItem([filename, user, size_mb, speed_kb, slots])
                 item.setData(0, QtCore.Qt.ItemDataRole.UserRole, filename)
                 item.setData(1, QtCore.Qt.ItemDataRole.UserRole, user)
                 self.results_list.addTopLevelItem(item)
@@ -506,9 +530,9 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
 
     def on_download_complete(self, path):
         self.status_label.setText(_("Download Complete: {}").format(path))
-        # Add to Picard
+        # Add to Picard and try to match to target album
         tagger = Tagger.instance()
-        tagger.add_files([path])
+        tagger.add_files([path], target=self.target_album)
         QtWidgets.QMessageBox.information(self, _("Download Complete"), _("File downloaded and added to Picard:\n{}").format(path))
 
     def on_error(self, msg):
@@ -539,7 +563,7 @@ class SearchSoulseek(BaseAction):
         password = config.setting['soulseek_password']
 
         if HAS_AIOSLSK and username and password:
-            dialog = SoulseekSearchDialog(tagger.window, query)
+            dialog = SoulseekSearchDialog(tagger.window, query, target_album=album)
             dialog.exec()
         else:
             # Fallback

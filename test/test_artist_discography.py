@@ -88,6 +88,26 @@ class TestArtistDiscographyPlugin(PicardTestCase):
         self.assertEqual(self.config.setting['soulseek_password'], "new_pass")
         self.assertEqual(self.config.setting['soulseek_download_dir'], "/tmp/down")
 
+    @patch('picard.plugins.artist_discography.SoulseekSearchDialog')
+    def test_search_soulseek_dialog_launch(self, mock_dialog):
+        # Set credentials
+        self.config.setting['soulseek_username'] = 'user'
+        self.config.setting['soulseek_password'] = 'pass'
+
+        # Mock HAS_AIOSLSK constant in the plugin
+        with patch('picard.plugins.artist_discography.HAS_AIOSLSK', True):
+            album = MagicMock(spec=Album)
+            album.metadata = Metadata()
+            album.metadata['albumartist'] = 'Artist'
+            album.metadata['album'] = 'Album'
+
+            self.search_soulseek_action.callback([album])
+
+            mock_dialog.assert_called_once()
+            _, kwargs = mock_dialog.call_args
+            self.assertEqual(kwargs['target_album'], album)
+            mock_dialog.return_value.exec.assert_called_once()
+
     @patch('picard.plugins.artist_discography.SoulSeekClient')
     @patch('picard.plugins.artist_discography.SlskSettings')
     @patch('picard.plugins.artist_discography.HAS_AIOSLSK', True)
@@ -149,6 +169,26 @@ class TestArtistDiscographyPlugin(PicardTestCase):
         asyncio.run(service._do_download("user", "file"))
 
         self.assertEqual(completed_path[0], "/tmp/song.mp3")
+
+    @patch('picard.plugins.artist_discography.QtWidgets.QDialog') # Mock the whole class
+    @patch('picard.plugins.artist_discography.QtWidgets.QMessageBox')
+    def test_dialog_auto_add_files(self, mock_msgbox, mock_dialog_cls):
+        # Instead of instantiating the real dialog (which is hard to test due to PyQt internals),
+        # we can verify the logic by calling the method on the class directly with a mocked self,
+        # OR just mock the super init better.
+        # Let's try mocking the method call context.
+
+        target_album = MagicMock()
+
+        # Create a mock object that simulates the dialog instance
+        dialog_instance = MagicMock()
+        dialog_instance.target_album = target_album
+        dialog_instance.status_label = MagicMock()
+
+        # Call the unbound method on our mock instance
+        self.plugin.SoulseekSearchDialog.on_download_complete(dialog_instance, "/tmp/downloaded.mp3")
+
+        self.tagger_mock.add_files.assert_called_once_with(["/tmp/downloaded.mp3"], target=target_album)
 
 if __name__ == '__main__':
     unittest.main()
