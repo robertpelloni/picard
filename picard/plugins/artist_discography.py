@@ -18,6 +18,13 @@ Features:
 - **Load Artist Discography (Tool)**: Main menu tool to search for an artist by name and load their discography.
 - **Open on Bandcamp**: Context menu action (on Album) to open the Bandcamp page for the release. It uses Bandcamp URLs found in MusicBrainz relationships or falls back to a search.
 - **Search on Soulseek**: Context menu action (on Album) to search for the album on Soulseek. Supports native search and download via `aioslsk`.
+
+Requirements:
+    This plugin requires the `aioslsk` library for Soulseek integration.
+    To install:
+        pip install aioslsk
+
+    If the library is not found, the Soulseek features will default to a clipboard helper.
 """
 
 import asyncio
