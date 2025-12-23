@@ -3,7 +3,7 @@
 PLUGIN_NAME = 'Artist Discography & Bandcamp'
 PLUGIN_AUTHOR = 'Jules'
 PLUGIN_DESCRIPTION = 'Load all albums for an artist and open Bandcamp links. Includes Soulseek integration.'
-PLUGIN_VERSION = '0.4'
+PLUGIN_VERSION = '0.5'
 PLUGIN_API_VERSIONS = ['2.9', '2.10', '2.11', '3.0']
 PLUGIN_LICENSE = 'GPL-2.0-or-later'
 PLUGIN_LICENSE_URL = 'https://www.gnu.org/licenses/gpl-2.0.html'
@@ -51,6 +51,7 @@ try:
     from aioslsk.settings import Settings as SlskSettings, CredentialsSettings, SharesSettings
     from aioslsk.transfer.state import TransferState
     from aioslsk.transfer.model import TransferDirection
+    from aioslsk.commands import PeerGetDirectoryContentCommand
     HAS_AIOSLSK = True
 except ImportError:
     HAS_AIOSLSK = False
@@ -331,6 +332,7 @@ register_options_page(SoulseekOptionsPage)
 class SoulseekService(QtCore.QThread):
     results_found = QtCore.pyqtSignal(list)
     download_complete = QtCore.pyqtSignal(str)
+    folder_download_started = QtCore.pyqtSignal(str)
     service_error = QtCore.pyqtSignal(str)
 
     _instance = None
@@ -375,6 +377,10 @@ class SoulseekService(QtCore.QThread):
         if self.loop:
             asyncio.run_coroutine_threadsafe(self._do_download(user, filename), self.loop)
 
+    def perform_download_folder(self, user, folder_path):
+        if self.loop:
+            asyncio.run_coroutine_threadsafe(self._do_download_folder(user, folder_path), self.loop)
+
     async def _ensure_client(self):
         if self.client:
             return self.client
@@ -408,20 +414,61 @@ class SoulseekService(QtCore.QThread):
     async def _do_download(self, user, filename):
         try:
             client = await self._ensure_client()
-            transfer = await client.transfer_manager.download(user, filename)
-
-            # Monitor progress
-            while not transfer.state.is_complete:
-                 # Check for failures
-                 if transfer.state.is_aborted or transfer.state.is_failed:
-                      self.service_error.emit(f"Download failed: {filename}")
-                      return
-                 await asyncio.sleep(1)
-
-            if transfer.local_path:
-                 self.download_complete.emit(transfer.local_path)
+            await self._download_file_internal(client, user, filename)
         except Exception as e:
             self.service_error.emit(str(e))
+
+    async def _download_file_internal(self, client, user, filename):
+        transfer = await client.transfer_manager.download(user, filename)
+        # Monitor progress
+        while not transfer.state.is_complete:
+                # Check for failures
+                if transfer.state.is_aborted or transfer.state.is_failed:
+                    self.service_error.emit(f"Download failed: {filename}")
+                    return
+                await asyncio.sleep(1)
+
+        if transfer.local_path:
+                self.download_complete.emit(transfer.local_path)
+
+    async def _do_download_folder(self, user, folder_path):
+        try:
+            client = await self._ensure_client()
+            self.folder_download_started.emit(folder_path)
+
+            # Fetch directory listing
+            cmd = PeerGetDirectoryContentCommand(user, folder_path)
+            response = await client.execute(cmd)
+
+            # Response is list[DirectoryData], we assume the structure matches the folder we asked for
+            # The structure is usually flat or hierarchical depending on server response
+            # But the 'files' field in DirectoryData is what we need
+
+            # Flatten or find relevant files
+            downloads_queued = 0
+            for dir_data in response:
+                # Construct full path. DirectoryData.name is typically the folder name.
+                # If we requested "A\B", we expect files in that folder.
+                # Just downloading files in the immediate folder response for now.
+
+                for file_info in dir_data.files:
+                    # Simple filter for audio/image extensions
+                    ext = file_info.extension.lower()
+                    if ext in ('mp3', 'flac', 'm4a', 'ogg', 'wav', 'jpg', 'jpeg', 'png'):
+                        full_remote_path = f"{folder_path}\\{file_info.filename}"
+                        # Check separator (Soulseek usually sends backslash)
+                        if '\\' not in folder_path and '/' in folder_path:
+                             full_remote_path = f"{folder_path}/{file_info.filename}"
+
+                        # Queue download (async, don't wait for each one sequentially here)
+                        asyncio.create_task(self._download_file_internal(client, user, full_remote_path))
+                        downloads_queued += 1
+
+            if downloads_queued == 0:
+                self.service_error.emit(f"No audio files found in folder: {folder_path}")
+
+        except Exception as e:
+            self.service_error.emit(f"Folder download error: {e}")
 
 
 # Custom Tree Item for Numeric Sorting
@@ -462,6 +509,8 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
         self.results_list.setHeaderLabels([_("Filename"), _("User"), _("Size (MB)"), _("Speed (kB/s)"), _("In Queue")])
         self.results_list.setSortingEnabled(True)
         self.results_list.itemDoubleClicked.connect(self.start_download)
+        self.results_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.results_list.customContextMenuRequested.connect(self.show_context_menu)
         self.layout.addWidget(self.results_list)
 
         # Status
@@ -472,6 +521,7 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
         self.service = SoulseekService.instance()
         self.service.results_found.connect(self.display_results)
         self.service.download_complete.connect(self.on_download_complete)
+        self.service.folder_download_started.connect(self.on_folder_download_started)
         self.service.service_error.connect(self.on_error)
 
         # Configure service
@@ -518,6 +568,25 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
         self.status_label.setText(_("Found {} results").format(len(results)))
 
     def start_download(self, item, column):
+        self._initiate_download(item, folder=False)
+
+    def show_context_menu(self, position):
+        item = self.results_list.itemAt(position)
+        if not item:
+            return
+
+        menu = QtWidgets.QMenu()
+        dl_action = menu.addAction(_("Download File"))
+        dl_folder_action = menu.addAction(_("Download Album Folder"))
+
+        action = menu.exec(self.results_list.viewport().mapToGlobal(position))
+
+        if action == dl_action:
+            self._initiate_download(item, folder=False)
+        elif action == dl_folder_action:
+            self._initiate_download(item, folder=True)
+
+    def _initiate_download(self, item, folder=False):
         filename = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
         user = item.data(1, QtCore.Qt.ItemDataRole.UserRole)
 
@@ -525,15 +594,30 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
              QtWidgets.QMessageBox.warning(self, _("Config Error"), _("Please set a download directory in Options."))
              return
 
-        self.status_label.setText(_("Downloading: {}").format(filename))
-        self.service.perform_download(user, filename)
+        if folder:
+            # Extract folder path
+            # Soulseek usually sends Windows-style paths
+            folder_path = os.path.dirname(filename)
+            # Handle potential mix if platform differs from remote, but usually slsk preserves structure string
+            if not folder_path and '\\' in filename:
+                 folder_path = filename.rsplit('\\', 1)[0]
+
+            self.status_label.setText(_("Requesting folder download: {}").format(folder_path))
+            self.service.perform_download_folder(user, folder_path)
+        else:
+            self.status_label.setText(_("Downloading: {}").format(filename))
+            self.service.perform_download(user, filename)
 
     def on_download_complete(self, path):
-        self.status_label.setText(_("Download Complete: {}").format(path))
         # Add to Picard and try to match to target album
         tagger = Tagger.instance()
         tagger.add_files([path], target=self.target_album)
-        QtWidgets.QMessageBox.information(self, _("Download Complete"), _("File downloaded and added to Picard:\n{}").format(path))
+        # Update status quietly as multiple files might be coming in
+        self.status_label.setText(_("Downloaded: {}").format(os.path.basename(path)))
+
+    def on_folder_download_started(self, folder):
+        QtWidgets.QMessageBox.information(self, _("Download Started"),
+            _("Folder download started:\n{}\n\nFiles will automatically appear in Picard as they finish.").format(folder))
 
     def on_error(self, msg):
         self.status_label.setText(_("Error: {}").format(msg))

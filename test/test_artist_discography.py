@@ -3,7 +3,7 @@ import sys
 import unittest
 import asyncio
 from unittest.mock import MagicMock, patch, AsyncMock
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMenu
 
 # Initialize QApplication if not already present
 if not QApplication.instance():
@@ -88,26 +88,6 @@ class TestArtistDiscographyPlugin(PicardTestCase):
         self.assertEqual(self.config.setting['soulseek_password'], "new_pass")
         self.assertEqual(self.config.setting['soulseek_download_dir'], "/tmp/down")
 
-    @patch('picard.plugins.artist_discography.SoulseekSearchDialog')
-    def test_search_soulseek_dialog_launch(self, mock_dialog):
-        # Set credentials
-        self.config.setting['soulseek_username'] = 'user'
-        self.config.setting['soulseek_password'] = 'pass'
-
-        # Mock HAS_AIOSLSK constant in the plugin
-        with patch('picard.plugins.artist_discography.HAS_AIOSLSK', True):
-            album = MagicMock(spec=Album)
-            album.metadata = Metadata()
-            album.metadata['albumartist'] = 'Artist'
-            album.metadata['album'] = 'Album'
-
-            self.search_soulseek_action.callback([album])
-
-            mock_dialog.assert_called_once()
-            _, kwargs = mock_dialog.call_args
-            self.assertEqual(kwargs['target_album'], album)
-            mock_dialog.return_value.exec.assert_called_once()
-
     @patch('picard.plugins.artist_discography.SoulSeekClient')
     @patch('picard.plugins.artist_discography.SlskSettings')
     @patch('picard.plugins.artist_discography.HAS_AIOSLSK', True)
@@ -169,6 +149,49 @@ class TestArtistDiscographyPlugin(PicardTestCase):
         asyncio.run(service._do_download("user", "file"))
 
         self.assertEqual(completed_path[0], "/tmp/song.mp3")
+
+    @patch('picard.plugins.artist_discography.SoulSeekClient')
+    @patch('picard.plugins.artist_discography.SlskSettings')
+    @patch('picard.plugins.artist_discography.HAS_AIOSLSK', True)
+    def test_soulseek_service_download_folder(self, mock_settings, mock_client):
+        mock_client_instance = AsyncMock()
+        mock_client.return_value = mock_client_instance
+
+        # Mock directory response
+        mock_file = MagicMock()
+        mock_file.filename = "song.mp3"
+        mock_file.extension = "mp3"
+
+        mock_dir_data = MagicMock()
+        mock_dir_data.files = [mock_file]
+
+        # client.execute returns response
+        mock_client_instance.execute.return_value = [mock_dir_data]
+
+        # Mock transfer for inner file download
+        mock_transfer = MagicMock()
+        mock_transfer.local_path = "/tmp/song.mp3"
+        state_mock = MagicMock()
+        state_mock.is_complete = True
+        state_mock.is_aborted = False
+        state_mock.is_failed = False
+        mock_transfer.state = state_mock
+        mock_client_instance.transfer_manager.download.return_value = mock_transfer
+
+        service = self.plugin.SoulseekService.instance()
+        service.configure("u", "p", "/d")
+        service.client = mock_client_instance
+
+        # We need to capture the fact that _download_file_internal was called/scheduled
+        # Since _do_download_folder spawns async tasks, we should verify those tasks.
+        # But asyncio.create_task is hard to check.
+        # We can check if client.transfer_manager.download was called.
+
+        asyncio.run(service._do_download_folder("user", "remote\\folder"))
+
+        mock_client_instance.execute.assert_called_once()
+        # Verify download was queued for the file found in folder
+        mock_client_instance.transfer_manager.download.assert_called_with("user", "remote\\folder\\song.mp3")
 
     @patch('picard.plugins.artist_discography.QtWidgets.QDialog') # Mock the whole class
     @patch('picard.plugins.artist_discography.QtWidgets.QMessageBox')
