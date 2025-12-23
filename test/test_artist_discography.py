@@ -120,9 +120,11 @@ class TestArtistDiscographyPlugin(PicardTestCase):
         service.client = mock_client_instance
 
         results_received = []
-        service.results_found.connect(lambda res: results_received.extend(res))
+        # Update signal connection to accept context
+        service.results_found.connect(lambda res, ctx: results_received.extend(res))
 
-        asyncio.run(service._do_search("query"))
+        context = object()
+        asyncio.run(service._do_search("query", context))
 
         self.assertEqual(len(results_received), 1)
         self.assertEqual(results_received[0].filename, "song.mp3")
@@ -152,9 +154,11 @@ class TestArtistDiscographyPlugin(PicardTestCase):
         service.client = mock_client_instance
 
         completed_path = []
-        service.download_complete.connect(lambda p: completed_path.append(p))
+        # Update signal connection to accept context
+        service.download_complete.connect(lambda p, ctx: completed_path.append(p))
 
-        asyncio.run(service._do_download("user", "file"))
+        context = object()
+        asyncio.run(service._do_download("user", "file", context))
 
         self.assertEqual(completed_path[0], "/tmp/song.mp3")
 
@@ -195,7 +199,8 @@ class TestArtistDiscographyPlugin(PicardTestCase):
         # But asyncio.create_task is hard to check.
         # We can check if client.transfer_manager.download was called.
 
-        asyncio.run(service._do_download_folder("user", "remote\\folder"))
+        context = object()
+        asyncio.run(service._do_download_folder("user", "remote\\folder", context))
 
         mock_client_instance.execute.assert_called_once()
         # Verify download was queued for the file found in folder
@@ -217,9 +222,18 @@ class TestArtistDiscographyPlugin(PicardTestCase):
         dialog_instance.status_label = MagicMock()
 
         # Call the unbound method on our mock instance
-        self.plugin.SoulseekSearchDialog.on_download_complete(dialog_instance, "/tmp/downloaded.mp3")
+        context_id = object()
+        dialog_instance.context_id = context_id
 
+        # 1. Test Matching Context
+        self.plugin.SoulseekSearchDialog.on_download_complete(dialog_instance, "/tmp/downloaded.mp3", context_id)
         self.tagger_mock.add_files.assert_called_once_with(["/tmp/downloaded.mp3"], target=target_album)
+
+        # 2. Test Mismatching Context
+        self.tagger_mock.add_files.reset_mock()
+        other_context = object()
+        self.plugin.SoulseekSearchDialog.on_download_complete(dialog_instance, "/tmp/downloaded.mp3", other_context)
+        self.tagger_mock.add_files.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()

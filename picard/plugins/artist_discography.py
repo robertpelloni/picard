@@ -338,10 +338,10 @@ register_options_page(SoulseekOptionsPage)
 
 # Soulseek Service (Threaded Worker)
 class SoulseekService(QtCore.QThread):
-    results_found = QtCore.pyqtSignal(list)
-    download_complete = QtCore.pyqtSignal(str)
-    folder_download_started = QtCore.pyqtSignal(str)
-    service_error = QtCore.pyqtSignal(str)
+    results_found = QtCore.pyqtSignal(list, object)
+    download_complete = QtCore.pyqtSignal(str, object)
+    folder_download_started = QtCore.pyqtSignal(str, object)
+    service_error = QtCore.pyqtSignal(str, object)
 
     _instance = None
 
@@ -377,17 +377,17 @@ class SoulseekService(QtCore.QThread):
         if not self.isRunning():
             self.start()
 
-    def perform_search(self, query):
+    def perform_search(self, query, context):
         if self.loop:
-            asyncio.run_coroutine_threadsafe(self._do_search(query), self.loop)
+            asyncio.run_coroutine_threadsafe(self._do_search(query, context), self.loop)
 
-    def perform_download(self, user, filename):
+    def perform_download(self, user, filename, context):
         if self.loop:
-            asyncio.run_coroutine_threadsafe(self._do_download(user, filename), self.loop)
+            asyncio.run_coroutine_threadsafe(self._do_download(user, filename, context), self.loop)
 
-    def perform_download_folder(self, user, folder_path):
+    def perform_download_folder(self, user, folder_path, context):
         if self.loop:
-            asyncio.run_coroutine_threadsafe(self._do_download_folder(user, folder_path), self.loop)
+            asyncio.run_coroutine_threadsafe(self._do_download_folder(user, folder_path, context), self.loop)
 
     async def _ensure_client(self):
         if self.client:
@@ -407,7 +407,7 @@ class SoulseekService(QtCore.QThread):
         await self.client.login()
         return self.client
 
-    async def _do_search(self, query):
+    async def _do_search(self, query, context):
         try:
             client = await self._ensure_client()
             results = []
@@ -415,34 +415,34 @@ class SoulseekService(QtCore.QThread):
                 results.append(result)
                 if len(results) >= 50:
                     break
-            self.results_found.emit(results)
+            self.results_found.emit(results, context)
         except Exception as e:
-            self.service_error.emit(str(e))
+            self.service_error.emit(str(e), context)
 
-    async def _do_download(self, user, filename):
+    async def _do_download(self, user, filename, context):
         try:
             client = await self._ensure_client()
-            await self._download_file_internal(client, user, filename)
+            await self._download_file_internal(client, user, filename, context)
         except Exception as e:
-            self.service_error.emit(str(e))
+            self.service_error.emit(str(e), context)
 
-    async def _download_file_internal(self, client, user, filename):
+    async def _download_file_internal(self, client, user, filename, context):
         transfer = await client.transfer_manager.download(user, filename)
         # Monitor progress
         while not transfer.state.is_complete:
                 # Check for failures
                 if transfer.state.is_aborted or transfer.state.is_failed:
-                    self.service_error.emit(f"Download failed: {filename}")
+                    self.service_error.emit(f"Download failed: {filename}", context)
                     return
                 await asyncio.sleep(1)
 
         if transfer.local_path:
-                self.download_complete.emit(transfer.local_path)
+                self.download_complete.emit(transfer.local_path, context)
 
-    async def _do_download_folder(self, user, folder_path):
+    async def _do_download_folder(self, user, folder_path, context):
         try:
             client = await self._ensure_client()
-            self.folder_download_started.emit(folder_path)
+            self.folder_download_started.emit(folder_path, context)
 
             # Fetch directory listing
             cmd = PeerGetDirectoryContentCommand(user, folder_path)
@@ -469,14 +469,14 @@ class SoulseekService(QtCore.QThread):
                              full_remote_path = f"{folder_path}/{file_info.filename}"
 
                         # Queue download (async, don't wait for each one sequentially here)
-                        asyncio.create_task(self._download_file_internal(client, user, full_remote_path))
+                        asyncio.create_task(self._download_file_internal(client, user, full_remote_path, context))
                         downloads_queued += 1
 
             if downloads_queued == 0:
-                self.service_error.emit(f"No audio files found in folder: {folder_path}")
+                self.service_error.emit(f"No audio files found in folder: {folder_path}", context)
 
         except Exception as e:
-            self.service_error.emit(f"Folder download error: {e}")
+            self.service_error.emit(f"Folder download error: {e}", context)
 
 
 # Custom Tree Item for Numeric Sorting
@@ -499,6 +499,7 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
     def __init__(self, parent, initial_query, target_album=None):
         super().__init__(parent)
         self.target_album = target_album
+        self.context_id = object()
         self.setWindowTitle(_("Soulseek Search"))
         self.resize(900, 400)
         self.layout = QtWidgets.QVBoxLayout(self)
@@ -544,9 +545,12 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
         self.results_list.clear()
         self.status_label.setText(_("Searching..."))
         self.search_button.setEnabled(False)
-        self.service.perform_search(query)
+        self.service.perform_search(query, self.context_id)
 
-    def display_results(self, results):
+    def display_results(self, results, context):
+        if context is not self.context_id:
+            return
+
         self.search_button.setEnabled(True)
         if not results:
              self.status_label.setText(_("No results found."))
@@ -632,23 +636,32 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
                  folder_path = filename.rsplit('\\', 1)[0]
 
             self.status_label.setText(_("Requesting folder download: {}").format(folder_path))
-            self.service.perform_download_folder(user, folder_path)
+            self.service.perform_download_folder(user, folder_path, self.context_id)
         else:
             self.status_label.setText(_("Downloading: {}").format(filename))
-            self.service.perform_download(user, filename)
+            self.service.perform_download(user, filename, self.context_id)
 
-    def on_download_complete(self, path):
+    def on_download_complete(self, path, context):
+        if context is not self.context_id:
+            return
+
         # Add to Picard and try to match to target album
         tagger = Tagger.instance()
         tagger.add_files([path], target=self.target_album)
         # Update status quietly as multiple files might be coming in
         self.status_label.setText(_("Downloaded: {}").format(os.path.basename(path)))
 
-    def on_folder_download_started(self, folder):
+    def on_folder_download_started(self, folder, context):
+        if context is not self.context_id:
+            return
+
         QtWidgets.QMessageBox.information(self, _("Download Started"),
             _("Folder download started:\n{}\n\nFiles will automatically appear in Picard as they finish.").format(folder))
 
-    def on_error(self, msg):
+    def on_error(self, msg, context):
+        if context is not self.context_id:
+            return
+
         self.status_label.setText(_("Error: {}").format(msg))
         self.search_button.setEnabled(True)
 
