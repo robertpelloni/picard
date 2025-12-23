@@ -3,7 +3,7 @@
 PLUGIN_NAME = 'Artist Discography & Bandcamp'
 PLUGIN_AUTHOR = 'Jules'
 PLUGIN_DESCRIPTION = 'Load all albums for an artist and open Bandcamp links. Includes Soulseek integration.'
-PLUGIN_VERSION = '0.5'
+PLUGIN_VERSION = '0.6'
 PLUGIN_API_VERSIONS = ['2.9', '2.10', '2.11', '3.0']
 PLUGIN_LICENSE = 'GPL-2.0-or-later'
 PLUGIN_LICENSE_URL = 'https://www.gnu.org/licenses/gpl-2.0.html'
@@ -52,6 +52,7 @@ try:
     from aioslsk.transfer.state import TransferState
     from aioslsk.transfer.model import TransferDirection
     from aioslsk.commands import PeerGetDirectoryContentCommand
+    from aioslsk.protocol.primitives import AttributeKey
     HAS_AIOSLSK = True
 except ImportError:
     HAS_AIOSLSK = False
@@ -478,8 +479,8 @@ class SoulseekResultItem(QtWidgets.QTreeWidgetItem):
         text1 = self.text(column)
         text2 = other.text(column)
 
-        # Sort by numeric value for Size (2), Speed (3), and Queue (4)
-        if column in (2, 3, 4):
+        # Sort by numeric value for Bitrate(2), Size (3), Speed (4), and Queue (5)
+        if column in (2, 3, 4, 5):
             try:
                 return float(text1) < float(text2)
             except ValueError:
@@ -492,7 +493,7 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.target_album = target_album
         self.setWindowTitle(_("Soulseek Search"))
-        self.resize(800, 400)
+        self.resize(900, 400)
         self.layout = QtWidgets.QVBoxLayout(self)
 
         # Search Input
@@ -506,7 +507,7 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
 
         # Results List
         self.results_list = QtWidgets.QTreeWidget()
-        self.results_list.setHeaderLabels([_("Filename"), _("User"), _("Size (MB)"), _("Speed (kB/s)"), _("In Queue")])
+        self.results_list.setHeaderLabels([_("Filename"), _("User"), _("Bitrate"), _("Size (MB)"), _("Speed (kB/s)"), _("In Queue")])
         self.results_list.setSortingEnabled(True)
         self.results_list.itemDoubleClicked.connect(self.start_download)
         self.results_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
@@ -549,6 +550,10 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
                 filename = getattr(res, 'filename', str(res))
                 user = getattr(res, 'user', 'Unknown')
 
+                # Get Attributes
+                attrs = res.get_attribute_map()
+                bitrate = attrs.get(AttributeKey.BITRATE, 0)
+
                 size_bytes = getattr(res, 'size', 0)
                 size_mb = f"{size_bytes / (1024 * 1024):.2f}"
 
@@ -559,11 +564,28 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
                 if getattr(res, 'is_free', False):
                     slots += " (Free)"
 
-                item = SoulseekResultItem([filename, user, size_mb, speed_kb, slots])
+                item = SoulseekResultItem([filename, user, str(bitrate), size_mb, speed_kb, slots])
+
+                # Quality Highlighting
+                ext = getattr(res, 'extension', '').lower()
+                font = item.font(0)
+
+                if ext in ('flac', 'wav') or bitrate >= 320:
+                    # High Quality: Bold + Greenish tint
+                    font.setBold(True)
+                    for i in range(6):
+                        item.setFont(i, font)
+                        item.setForeground(i, QtGui.QBrush(QtGui.QColor(0, 100, 0))) # Dark Green
+                elif bitrate > 0 and bitrate < 192 and ext == 'mp3':
+                    # Low Quality: Red tint
+                    for i in range(6):
+                        item.setForeground(i, QtGui.QBrush(QtGui.QColor(150, 0, 0))) # Dark Red
+
                 item.setData(0, QtCore.Qt.ItemDataRole.UserRole, filename)
                 item.setData(1, QtCore.Qt.ItemDataRole.UserRole, user)
                 self.results_list.addTopLevelItem(item)
-            except:
+            except Exception as e:
+                # log.debug(f"Row error: {e}")
                 continue
         self.status_label.setText(_("Found {} results").format(len(results)))
 

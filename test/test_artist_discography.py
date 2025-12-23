@@ -96,9 +96,17 @@ class TestArtistDiscographyPlugin(PicardTestCase):
         mock_client_instance = MagicMock() # Use MagicMock instead of AsyncMock for search iterator
         mock_client.return_value = mock_client_instance
 
-        # Mock search results as an async iterator
+        # Mock search results
+        mock_result = MagicMock()
+        mock_result.filename = "song.mp3"
+        mock_result.user = "User1"
+        mock_result.size = 1024
+        mock_result.speed = 100
+        mock_result.slots = True
+        mock_result.get_attribute_map.return_value = {} # Needed for display logic
+
         async def async_results_iter(query):
-            yield MagicMock(filename="song.mp3", user="User1", size=1024, speed=100, slots=True)
+            yield mock_result
 
         # Ensure that client.search() returns the async iterator directly when called
         mock_client_instance.search.side_effect = lambda q: async_results_iter(q)
