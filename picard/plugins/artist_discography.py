@@ -506,13 +506,13 @@ class DiscographyLoader:
         except Exception as e:
             log.error(f"Error parsing artist search: {e}")
 
-    def load_release_groups(self, artist_id):
+    def load_release_groups(self, artist_id, offset=0):
         path = f"artist/{artist_id}"
         webservice.get(config.setting["server_host"], config.setting["server_port"],
-                       path, partial(self._on_release_groups_result),
-                       args={"inc": "release-groups", "limit": "100"}) # Limit to 100 for now
+                       path, partial(self._on_release_groups_result, artist_id=artist_id, offset=offset),
+                       args={"inc": "release-groups", "limit": "100", "offset": str(offset)})
 
-    def _on_release_groups_result(self, response, reply, error):
+    def _on_release_groups_result(self, response, reply, error, artist_id, offset):
         if error:
             log.error(f"Release group fetch failed: {error}")
             return
@@ -522,18 +522,25 @@ class DiscographyLoader:
             root = ET.fromstring(response)
             ns = {'mb': 'http://musicbrainz.org/ns/mmd-2.0#'}
 
-            # Find all release groups
-            rgs = root.findall('.//mb:release-group', ns)
-            for rg in rgs:
-                rg_id = rg.attrib['id']
-                # Requirement: "populates... with album structures... associated with a given artist"
-                # We can load one release per release group to represent it.
-                # To do this effectively without spamming requests, we should pick the 'official' 'primary' one.
-                # But querying every RG for its releases is heavy.
+            # Check pagination
+            artist_elem = root.find('.//mb:artist', ns)
+            rg_list_elem = artist_elem.find('mb:release-group-list', ns) if artist_elem is not None else None
 
-                # Picard's tagger.load_album requires a Release ID, not RG ID.
-                # So we must fetch releases for this RG.
-                self.fetch_release_for_rg(rg_id)
+            total_count = 0
+            if rg_list_elem is not None:
+                total_count = int(rg_list_elem.attrib.get('count', 0))
+
+                # Find all release groups
+                rgs = rg_list_elem.findall('mb:release-group', ns)
+                for rg in rgs:
+                    rg_id = rg.attrib['id']
+                    # Picard's tagger.load_album requires a Release ID, not RG ID.
+                    self.fetch_release_for_rg(rg_id)
+
+                # Pagination
+                next_offset = offset + 100
+                if next_offset < total_count:
+                    self.load_release_groups(artist_id, next_offset)
 
         except Exception as e:
             log.error(f"Error parsing release groups: {e}")
@@ -571,18 +578,31 @@ class LoadDiscographyAction(BaseAction):
 
     def callback(self, objects):
         artist = None
+        artist_id = None
         if objects:
             obj = objects[0]
             if isinstance(obj, Cluster):
                 artist = obj.metadata["artist"]
+                artist_id = obj.metadata["musicbrainz_artistid"]
             elif isinstance(obj, Album):
                 artist = obj.artist
+                artist_id = obj.metadata["musicbrainz_artistid"]
             elif isinstance(obj, File):
                 artist = obj.metadata["artist"]
+                artist_id = obj.metadata["musicbrainz_artistid"]
+
+        # Split multiple IDs if present (MBID can be multi-value, usually separated by / or ; in UI but list in metadata)
+        # In Picard metadata, it might be a list or string.
+        if isinstance(artist_id, list) and artist_id:
+            artist_id = artist_id[0]
 
         if artist:
             loader = DiscographyLoader(artist)
-            loader.start()
+            if artist_id:
+                # If we have an ID, skip search and go straight to loading
+                loader.load_release_groups(artist_id)
+            else:
+                loader.start()
 
 register_cluster_action(LoadDiscographyAction)
 register_album_action(LoadDiscographyAction)
