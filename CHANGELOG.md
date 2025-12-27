@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.14.1] - 2025-12-27
+
+### Added
+- **Global Download Queue:** Added "Soulseek Transfers" menu item to view active background downloads.
+- **Improved Auto-Matching:** Added retry logic to ensure downloads are correctly matched to albums.
+
 ## [2.14.0] - 2025-12-27
 
 ### Added

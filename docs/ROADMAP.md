@@ -21,7 +21,7 @@
     - Use AcoustID fingerprinting on downloaded files immediately to verify quality.
 - [ ] **Soulseek Uploading:**
     - Allow sharing of local library (Release 2.0).
-- [ ] **Queue Management:**
-    - Global download queue manager UI (currently per-album dialogs).
+- [x] **Queue Management:**
+-    - Global download queue manager UI (Soulseek Transfers dialog).
 - [ ] **Protocol Optimization:**
     - Improve Soulseek folder browsing performance (caching).

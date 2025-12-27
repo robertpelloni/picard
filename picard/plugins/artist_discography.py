@@ -38,6 +38,7 @@ try:
     from picard.ui.options import register_options_page
 except ImportError:
     from picard.extension_points.options_pages import register_options_page
+from picard.extension_points.plugin_tools_menu import register_tools_menu_action
 from picard.util import thread
 
 # Conditional import for aioslsk
@@ -92,6 +93,7 @@ class SoulseekService(QtCore.QThread):
     """
     search_result_received = QtCore.pyqtSignal(object, object)  # context, result
     download_complete = QtCore.pyqtSignal(object, str) # context, filepath
+    download_started = QtCore.pyqtSignal(str) # filename
     status_message = QtCore.pyqtSignal(str)
 
     _instance = None
@@ -108,6 +110,7 @@ class SoulseekService(QtCore.QThread):
         self.client = None
         self.connected = False
         self._keep_running = True
+        self.downloads = [] # List of dicts: {'filename': str, 'status': str}
         self.start()
 
     def run(self):
@@ -181,9 +184,15 @@ class SoulseekService(QtCore.QThread):
             os.makedirs(download_dir)
 
         try:
-            # We need to find the file object from the search result if it's not passed directly
-            # For this simplified version, let's assume 'result' is the file object or has what we need
+            self.downloads.append({'filename': result.filename, 'status': 'Downloading'})
+            self.download_started.emit(result.filename)
+
             await self.client.download(result, path=download_dir)
+
+            # Update status
+            for d in self.downloads:
+                if d['filename'] == result.filename:
+                    d['status'] = 'Completed'
 
             # The filename might need to be constructed
             filename = result.filename
@@ -192,6 +201,9 @@ class SoulseekService(QtCore.QThread):
             self.download_complete.emit(context, full_path)
             self.status_message.emit(f"Downloaded: {filename}")
         except Exception as e:
+            for d in self.downloads:
+                if d['filename'] == result.filename:
+                    d['status'] = 'Error'
             self.status_message.emit(f"Download Error: {e}")
 
     async def _do_download_folder(self, result, context):
@@ -439,6 +451,27 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
         self.status_label.setText(msg)
 
 
+class SoulseekQueueDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Soulseek Transfers")
+        self.resize(600, 400)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        self.list_widget = QtWidgets.QListWidget()
+        layout.addWidget(self.list_widget)
+
+        self.service = SoulseekService.instance()
+        self.service.download_started.connect(self.refresh_list)
+        self.service.download_complete.connect(lambda c, f: self.refresh_list())
+
+        self.refresh_list()
+
+    def refresh_list(self):
+        self.list_widget.clear()
+        for d in self.service.downloads:
+            self.list_widget.addItem(f"{d['filename']} - {d['status']}")
+
 # =============================================================================
 # Bandcamp Logic
 # =============================================================================
@@ -607,3 +640,18 @@ class LoadDiscographyAction(BaseAction):
 register_cluster_action(LoadDiscographyAction)
 register_album_action(LoadDiscographyAction)
 register_file_action(LoadDiscographyAction)
+
+# Global Menu Action for Transfer Queue
+class ShowTransfersAction(BaseAction):
+    NAME = "Soulseek Transfers"
+
+    def callback(self, objects):
+        service = SoulseekService.instance()
+        if not hasattr(service, 'queue_dialog') or not service.queue_dialog:
+            service.queue_dialog = SoulseekQueueDialog()
+
+        service.queue_dialog.show()
+        service.queue_dialog.raise_()
+        service.queue_dialog.activateWindow()
+
+register_tools_menu_action(ShowTransfersAction)
