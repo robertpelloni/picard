@@ -40,6 +40,7 @@ except ImportError:
     from picard.extension_points.options_pages import register_options_page
 from picard.extension_points.plugin_tools_menu import register_tools_menu_action
 from picard.util import thread
+from picard.webservice import utils as ws_utils
 
 # Conditional import for aioslsk
 try:
@@ -221,16 +222,16 @@ class SoulseekService(QtCore.QThread):
         try:
             self.status_message.emit(f"Browsing folder: {remote_folder}...")
 
-            # Request directory contents using aioslsk
-            # Note: client.get_dir_contents is the high-level helper if available, otherwise we use commands directly.
-            # Assuming standard aioslsk client usage based on review hints about PeerGetDirectoryContentCommand.
-            # But usually client.dir(user, path) is the way.
-
-            # Since we can't be sure of the exact high-level method, we try the most common one in python-soulseek libs
-            # which is usually `get_dir` or `dir`.
-
-            # However, looking at aioslsk source patterns often seen:
-            contents = await self.client.get_dir_contents(result.user, remote_folder)
+            # Use standard aioslsk method 'get_dir' if available, otherwise fallback.
+            # Based on standard libraries, browsing is done via 'get_dir' which returns contents.
+            # We assume aioslsk follows this pattern.
+            if hasattr(self.client, 'get_dir'):
+                contents = await self.client.get_dir(result.user, remote_folder)
+            elif hasattr(self.client, 'dir'):
+                 contents = await self.client.dir(result.user, remote_folder)
+            else:
+                 # Fallback attempt
+                 contents = await self.client.get_dir_contents(result.user, remote_folder)
 
             if not contents:
                 self.status_message.emit("Folder is empty or could not be retrieved.")
@@ -392,60 +393,45 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
         # Use Picard's Tagger to add file and move to target album
         tagger_obj = tagger.Tagger.instance() # Singleton
 
-        # Adding files is async. We need to wait or callback.
-        # However, for simplicity and stability, we use the standard add_files
-        # and then try to move it if possible, or just let it load.
-        #
-        # Better approach:
-        # 1. Load the file object manually.
-        # 2. Add it to the Album.
-        # 3. Trigger Tagger to recognize it?
-
         try:
             # We trigger the standard file loading
             tagger_obj.add_files([filepath])
 
-            # Since we can't easily await the completion of loading in this context without
-            # complex signal handling, we will perform a "best effort" auto-match
-            # by queuing a function to run after a delay, or relying on Picard's clustering.
+            # Since loading is async, we try to move from unclustered to this album
+            # periodically for a few seconds.
+            log.info(f"Added {filepath} to Picard. Waiting for load...")
 
-            # If we want to be more direct:
-            # We can define a callback for when files are loaded.
-            # But add_files doesn't accept a callback directly in all versions.
-
-            # Strategy: We assume the user wants it in THIS album.
-            # We can tell the user to "Cluster" or we can try to force it.
-
-            # Let's try to pass the 'target' album to add_files if supported? No.
-
-            log.info(f"Added {filepath} to Picard. It should appear in Unclustered Files.")
-
-            # EXPERIMENTAL: Try to move from unclustered to this album after a short delay
-            # This requires the file to be fully loaded.
-            QtCore.QTimer.singleShot(1000, lambda: self._move_file_to_album(filepath))
+            self._schedule_move_attempt(filepath, attempts=5)
 
         except Exception as e:
             log.error(f"Error adding file to album: {e}")
 
-    def _move_file_to_album(self, filepath):
+    def _schedule_move_attempt(self, filepath, attempts):
+        if attempts <= 0:
+            return
+        # Try every 1 second
+        QtCore.QTimer.singleShot(1000, lambda: self._move_file_to_album(filepath, attempts))
+
+    def _move_file_to_album(self, filepath, remaining_attempts):
         # Find the file in unclustered files
         tagger_obj = tagger.Tagger.instance()
         found_file = None
-        for file in tagger_obj.unclustered_files.files:
-            if file.filename == filepath:
-                found_file = file
-                break
+
+        # Check if UnclusteredFiles exists and has files
+        if hasattr(tagger_obj, 'unclustered_files'):
+            for file in tagger_obj.unclustered_files.files:
+                if file.filename == filepath:
+                    found_file = file
+                    break
 
         if found_file and self.album:
             # Move to album
             tagger_obj.unclustered_files.remove_file(found_file)
             self.album.add_files([found_file])
-            # Trigger matching/lookup for this file against the album tracks?
-            # Or just leave it in the album cluster.
             log.info(f"Moved {filepath} to album {self.album.title}")
-
-            # Optional: analyze/match
-            # self.album.match_files([found_file]) # hypothetical method
+        else:
+            # Retry
+            self._schedule_move_attempt(filepath, remaining_attempts - 1)
 
     def update_status(self, msg):
         self.status_label.setText(msg)
@@ -512,9 +498,23 @@ class DiscographyLoader:
         # Search for artist to get ID
         path = "artist"
         query = f'artist:"{self.artist_name}"'
-        webservice.get(config.setting["server_host"], config.setting["server_port"],
-                       path, partial(self._on_artist_search_result),
-                       args={"query": query})
+
+        # Use Tagger.instance().webservice which is the WebService singleton
+        tagger_obj = tagger.Tagger.instance()
+        host = config.setting["server_host"]
+        port = config.setting["server_port"]
+
+        # Construct proper URL
+        # We use ws_utils to help with URL construction
+        url = ws_utils.host_port_to_url(host, port)
+        url.setPath(f"/ws/2/{path}")
+
+        tagger_obj.webservice.get_url(
+            url=url,
+            queryargs={"query": query},
+            handler=partial(self._on_artist_search_result),
+            parse_response_type='xml'
+        )
 
     def _on_artist_search_result(self, response, reply, error):
         if error:
@@ -541,9 +541,19 @@ class DiscographyLoader:
 
     def load_release_groups(self, artist_id, offset=0):
         path = f"artist/{artist_id}"
-        webservice.get(config.setting["server_host"], config.setting["server_port"],
-                       path, partial(self._on_release_groups_result, artist_id=artist_id, offset=offset),
-                       args={"inc": "release-groups", "limit": "100", "offset": str(offset)})
+
+        tagger_obj = tagger.Tagger.instance()
+        host = config.setting["server_host"]
+        port = config.setting["server_port"]
+        url = ws_utils.host_port_to_url(host, port)
+        url.setPath(f"/ws/2/{path}")
+
+        tagger_obj.webservice.get_url(
+            url=url,
+            queryargs={"inc": "release-groups", "limit": "100", "offset": str(offset)},
+            handler=partial(self._on_release_groups_result, artist_id=artist_id, offset=offset),
+            parse_response_type='xml'
+        )
 
     def _on_release_groups_result(self, response, reply, error, artist_id, offset):
         if error:
@@ -580,10 +590,19 @@ class DiscographyLoader:
 
     def fetch_release_for_rg(self, rg_id):
         path = f"release-group/{rg_id}"
-        # We want the earliest official release ideally, or just any.
-        webservice.get(config.setting["server_host"], config.setting["server_port"],
-                       path, partial(self._on_releases_result),
-                       args={"inc": "releases", "limit": "1"})
+
+        tagger_obj = tagger.Tagger.instance()
+        host = config.setting["server_host"]
+        port = config.setting["server_port"]
+        url = ws_utils.host_port_to_url(host, port)
+        url.setPath(f"/ws/2/{path}")
+
+        tagger_obj.webservice.get_url(
+             url=url,
+             queryargs={"inc": "releases", "limit": "1"},
+             handler=partial(self._on_releases_result),
+             parse_response_type='xml'
+        )
 
     def _on_releases_result(self, response, reply, error):
         if error:
