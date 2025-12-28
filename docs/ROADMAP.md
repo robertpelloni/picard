@@ -14,6 +14,7 @@
     - Search UI with sorting and coloring.
     - Download logic (Files/Folders).
     - Auto-clustering of downloaded files.
+    - **Queue Management:** Global download queue manager UI (Soulseek Transfers dialog).
 
 ## Future / Planned Features
 
@@ -21,7 +22,5 @@
     - Use AcoustID fingerprinting on downloaded files immediately to verify quality.
 - [ ] **Soulseek Uploading:**
     - Allow sharing of local library (Release 2.0).
-- [x] **Queue Management:**
--    - Global download queue manager UI (Soulseek Transfers dialog).
 - [ ] **Protocol Optimization:**
     - Improve Soulseek folder browsing performance (caching).
