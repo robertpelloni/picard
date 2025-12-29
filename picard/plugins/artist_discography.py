@@ -430,11 +430,22 @@ class SoulseekSearchDialog(QtWidgets.QDialog):
                     found_file = file
                     break
 
-        if found_file and self.album:
-            # Move to album
-            tagger_obj.unclustered_files.remove_file(found_file)
-            self.album.add_files([found_file])
-            log.info(f"Moved {filepath} to album {self.album.title}")
+        if found_file:
+            # Start AcoustID analysis if enabled
+            if tagger_obj.use_acoustid and found_file.can_analyze:
+                 log.info(f"Analyzing AcoustID for {filepath}")
+                 tagger_obj.analyze([found_file])
+
+            if self.album:
+                # Move to album
+                tagger_obj.unclustered_files.remove_file(found_file)
+                # Picard Album object uses add_file, not add_files
+                if hasattr(self.album, 'add_files'):
+                     self.album.add_files([found_file])
+                elif hasattr(self.album, 'add_file'):
+                     self.album.add_file(found_file)
+
+                log.info(f"Moved {filepath} to album {self.album.title}")
         else:
             # Retry
             self._schedule_move_attempt(filepath, remaining_attempts - 1)

@@ -2,13 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.14.1] - 2025-12-27
+## [3.0.0.dev11] - 2025-12-28
 
 ### Added
-- **Global Download Queue:** Added "Soulseek Transfers" menu item to view active background downloads.
-- **Improved Auto-Matching:** Added retry logic to ensure downloads are correctly matched to albums.
+- **Advanced Matching:**
+    - Integrated AcoustID fingerprinting for downloaded files.
+    - Automatically triggers analysis (`tagger.analyze`) when a file is downloaded and moved to an album if AcoustID is enabled.
 
-## [2.14.0] - 2025-12-27
+## [3.0.0.dev10] - 2025-12-28
 
 ### Added
 - **Artist Discography Plugin (v1.0):**
@@ -24,6 +25,8 @@ All notable changes to this project will be documented in this file.
     - Download single files or full album folders.
     - Automatic matching of downloaded files to target Picard albums.
     - Configurable credentials and download path in Options.
+- **Global Download Queue:** Added "Soulseek Transfers" menu item to view active background downloads.
+- **Improved Auto-Matching:** Added retry logic to ensure downloads are correctly matched to albums.
 
 ### Changed
 - Updated `PLUGIN_API_VERSIONS` to include 2.12 and 3.0 support.

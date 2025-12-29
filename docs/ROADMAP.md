@@ -1,25 +1,21 @@
 # Project Roadmap
 
-## Completed Features (v2.14.0 / Plugin v1.0)
+## Current Version: 3.0.0.dev10
 
-- [x] **Discography Loader:**
-    - Fetch all release groups for an artist.
-    - Fetch representative releases.
-    - Load into Picard UI.
-- [x] **Bandcamp Integration:**
-    - Context menu action.
-    - URL extraction from relationships.
-- [x] **Soulseek Integration:**
-    - Native `aioslsk` integration (Asyncio/QThread).
-    - Search UI with sorting and coloring.
-    - Download logic (Files/Folders).
-    - Auto-clustering of downloaded files.
-    - **Queue Management:** Global download queue manager UI (Soulseek Transfers dialog).
+## Active Development
+- [ ] **Advanced Matching (In Progress):**
+    - Integrate AcoustID fingerprinting for downloaded files.
+    - Verify downloaded files against MusicBrainz metadata.
+    - Improve auto-clustering reliability.
+
+## Completed Features (v3.0.0.dev10)
+- [x] **Artist Discography Plugin (v1.0):**
+    - Discography Loader (Recursive RG fetching).
+    - Bandcamp Integration (Metadata + Search).
+    - Soulseek Integration (Native aioslsk client, Search, Download).
+    - Queue Management (Global Transfers Dialog).
 
 ## Future / Planned Features
-
-- [ ] **Advanced Matching:**
-    - Use AcoustID fingerprinting on downloaded files immediately to verify quality.
 - [ ] **Soulseek Uploading:**
     - Allow sharing of local library (Release 2.0).
 - [ ] **Protocol Optimization:**

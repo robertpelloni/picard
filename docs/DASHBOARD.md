@@ -1,40 +1,24 @@
 # Project Dashboard
 
+**Version:** 3.0.0.dev10
+**Last Updated:** 2025-12-28
+
 ## Project Structure
-
-This repository contains the source code for **MusicBrainz Picard**, a cross-platform music tagger written in Python.
-
-### Directory Layout
-
-*   `picard/`: Main application source code.
-    *   `plugins/`: Built-in plugins (location of new `artist_discography` plugin).
-    *   `ui/`: User interface definitions (Qt).
-    *   `webservice/`: Networking and API logic.
-    *   `formats/`: Audio file format handlers.
-*   `test/`: Unit tests and test data.
-*   `docs/`: Documentation.
-*   `resources/`: Images, icons, and translation files.
-*   `po/`: Localization files.
+*   **Root:** Configuration (`pyproject.toml`), Metadata (`VERSION.md`, `CHANGELOG.md`).
+*   **picard/:** Core application source code.
+    *   `plugins/`: Extension plugins (including `artist_discography.py`).
+    *   `ui/`: User interface code.
+    *   `webservice/`: Networking and MusicBrainz API interaction.
+*   **docs/:** Documentation and Agent Instructions.
+*   **test/:** Unit and integration tests.
 
 ## Submodules
-
-*No git submodules are currently configured in this repository.*
+*   *None currently configured.*
 
 ## Build Information
+*   **Python:** >= 3.10
+*   **Dependencies:** Managed via `requirements.txt` / `pyproject.toml`.
+*   **Build System:** `setuptools`.
 
-*   **Version:** 3.0.0.dev9 (Reflected in `VERSION.md` and `picard/__init__.py`)
-*   **Build Date:** 2025-12-27
-*   **Supported Platforms:** Linux, macOS, Windows
-*   **Dependencies:** Python 3.8+, PyQt6 (or PyQt5), Mutagen, libdiscid, aioslsk (optional plugin dep).
-
-## Feature Status Report
-
-| Feature | Status | Notes |
-| :--- | :--- | :--- |
-| **Core Tagger** | Stable | Existing functionality. |
-| **Artist Discography Plugin** | **Completed** | New in v2.14.0. |
-| -- Load Discography | ✅ Done | Recursive MB lookup implemented. |
-| -- Bandcamp Link | ✅ Done | Metadata + Search fallback. |
-| -- Soulseek Search | ✅ Done | Native client. |
-| -- Soulseek Download | ✅ Done | File & Folder support. |
-| -- Auto-Matching | ✅ Done | Retry-based file moving. |
+## Recent Activity
+*   **v3.0.0.dev10:** Added Artist Discography & Soulseek Plugin (v1.0).
