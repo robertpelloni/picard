@@ -8,39 +8,45 @@ PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "
 PLUGIN_LICENSE = "GPL-2.0-or-later"
 PLUGIN_LICENSE_URL = "https://www.gnu.org/licenses/gpl-2.0.html"
 
+import asyncio
+from functools import partial
 import logging
 import os
-import re
 import webbrowser
-import asyncio
-import threading
-import collections
-from functools import partial
+
 
 try:
-    from PyQt6 import QtCore, QtWidgets, QtGui
+    from PyQt6 import QtCore, QtGui, QtWidgets
 except ImportError:
-    from PyQt5 import QtCore, QtWidgets, QtGui
+    from PyQt5 import QtCore, QtGui, QtWidgets
 
-from picard import config, tagger, webservice
+from picard import config, tagger
 from picard.album import Album
 from picard.cluster import Cluster
 from picard.file import File
-from picard.metadata import Metadata
+
+
 # Adjust imports based on Picard version structure
 try:
     from picard.ui.itemviews import BaseAction, register_album_action, register_cluster_action, register_file_action
 except ImportError:
     # Fallback for newer Picard versions where these might be in extension_points
-    from picard.extension_points.item_actions import BaseAction, register_album_action, register_cluster_action, register_file_action
+    from picard.extension_points.item_actions import (
+        BaseAction,
+        register_album_action,
+        register_cluster_action,
+        register_file_action,
+    )
 from picard.ui.options import OptionsPage
+
+
 try:
     from picard.ui.options import register_options_page
 except ImportError:
     from picard.extension_points.options_pages import register_options_page
 from picard.extension_points.plugin_tools_menu import register_tools_menu_action
-from picard.util import thread
 from picard.webservice import utils as ws_utils
+
 
 # Conditional import for aioslsk
 try:
